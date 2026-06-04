@@ -479,6 +479,7 @@ namespace
 			// Calling through the base-class pointer is correct — no cast needed.
 			// Fix 3: detect silent K2 rejection — TrySetDefaultValue has no return value; snapshot-and-compare.
 			const FString OldDefault = Pin->DefaultValue;
+			Pin->Modify(); // record pin pre-state for undo, matching the object/class branches (T2 review finding)
 			Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
 			if (Pin->DefaultValue == OldDefault && OldDefault != Value)
 			{
