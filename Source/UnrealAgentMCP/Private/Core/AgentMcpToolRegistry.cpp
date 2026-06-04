@@ -5,6 +5,8 @@
 
 FAgentMcpToolRegistry& FAgentMcpToolRegistry::Get()
 {
+	// Function-local static: init is thread-safe (magic statics); contents are plain FString/TSharedPtr/delegate,
+	// safe to destruct at DLL static-teardown. Revisit if the registry ever holds engine-subsystem handles.
 	static FAgentMcpToolRegistry Instance;
 	return Instance;
 }
@@ -16,6 +18,7 @@ void FAgentMcpToolRegistry::Register(FAgentMcpToolDef&& Def)
 		UE_LOG(LogAgentMcp, Warning, TEXT("Rejected invalid tool registration (empty name or unbound handler)"));
 		return;
 	}
+	// Copy before MoveTemp: function-argument evaluation order is unspecified, Def.Name could be moved-from.
 	const FString Name = Def.Name;
 	Tools.Add(Name, MoveTemp(Def));
 }

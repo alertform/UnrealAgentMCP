@@ -2,8 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "Core/McpTypes.h"
-
-class FJsonValue;
+#include "Dom/JsonValue.h"
 
 /**
  * Registry of all MCP tools. Instantiable for tests; the live instance is FAgentMcpToolRegistry::Get().
@@ -15,10 +14,13 @@ public:
 	/** Live registry used by the protocol layer. */
 	static FAgentMcpToolRegistry& Get();
 
-	/** Registers a tool. Re-registering the same name overwrites (last wins). */
+	/** Registers a tool. Re-registering the same name overwrites (last wins). Invalidates all pointers previously returned by Find(). */
 	void Register(FAgentMcpToolDef&& Def);
 
-	/** nullptr when no tool has that name. */
+	/**
+	 * Returns a pointer into the internal map, or nullptr when no tool has that name.
+	 * Valid only until the next Register() call — call Find() per request, never cache across registrations.
+	 */
 	const FAgentMcpToolDef* Find(const FString& Name) const;
 
 	/** MCP tools/list payload: array of {name, description, inputSchema}. */

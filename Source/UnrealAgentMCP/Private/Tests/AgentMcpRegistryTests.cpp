@@ -59,6 +59,7 @@ bool FAgentMcpRegistryToolsJsonTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("two tools serialized"), Tools.Num(), 2);
 
 	bool bFoundAlpha = false;
+	bool bFoundBeta = false;
 	for (const TSharedPtr<FJsonValue>& Value : Tools)
 	{
 		const TSharedPtr<FJsonObject> Obj = Value->AsObject();
@@ -68,8 +69,10 @@ bool FAgentMcpRegistryToolsJsonTest::RunTest(const FString& Parameters)
 			TestEqual(TEXT("description present"), Obj->GetStringField(TEXT("description")), FString(TEXT("Dummy tool for tests")));
 			TestTrue(TEXT("inputSchema present"), Obj->HasField(TEXT("inputSchema")));
 		}
+		if (Obj->GetStringField(TEXT("name")) == TEXT("beta")) { bFoundBeta = true; }
 	}
 	TestTrue(TEXT("alpha found in tools json"), bFoundAlpha);
+	TestTrue(TEXT("beta found in tools json"), bFoundBeta);
 	return true;
 }
 
@@ -89,6 +92,58 @@ bool FAgentMcpRegistryOverwriteTest::RunTest(const FString& Parameters)
 	if (Found)
 	{
 		TestEqual(TEXT("last registration wins"), Found->Description, FString(TEXT("Second registration wins")));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentMcpRegistryRejectsInvalidTest,
+	"UnrealAgentMCP.Registry.RejectsInvalidRegistration",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FAgentMcpRegistryRejectsInvalidTest::RunTest(const FString& Parameters)
+{
+	FAgentMcpToolRegistry Registry;
+
+	AddExpectedMessage(TEXT("Rejected invalid tool registration"), ELogVerbosity::Warning, EAutomationExpectedMessageFlags::Contains, 2);
+
+	FAgentMcpToolDef EmptyName;
+	EmptyName.Handler = FAgentMcpToolHandler::CreateLambda([](const TSharedPtr<FJsonObject>&)
+	{
+		return FAgentMcpToolResult::Success(TEXT(""));
+	});
+	Registry.Register(MoveTemp(EmptyName));
+	TestEqual(TEXT("empty-name registration rejected"), Registry.Num(), 0);
+
+	FAgentMcpToolDef NoHandler;
+	NoHandler.Name = TEXT("unbound");
+	Registry.Register(MoveTemp(NoHandler));
+	TestEqual(TEXT("unbound-handler registration rejected"), Registry.Num(), 0);
+
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAgentMcpRegistryNullSchemaJsonTest,
+	"UnrealAgentMCP.Registry.NullSchemaSerializesEmptyObject",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FAgentMcpRegistryNullSchemaJsonTest::RunTest(const FString& Parameters)
+{
+	FAgentMcpToolRegistry Registry;
+
+	FAgentMcpToolDef NoSchema;
+	NoSchema.Name = TEXT("no_schema");
+	NoSchema.Description = TEXT("Tool registered without an input schema");
+	NoSchema.Handler = FAgentMcpToolHandler::CreateLambda([](const TSharedPtr<FJsonObject>&)
+	{
+		return FAgentMcpToolResult::Success(TEXT(""));
+	});
+	Registry.Register(MoveTemp(NoSchema));
+
+	const TArray<TSharedPtr<FJsonValue>> Tools = Registry.BuildToolsJson();
+	TestEqual(TEXT("one tool serialized"), Tools.Num(), 1);
+	if (Tools.Num() == 1)
+	{
+		const TSharedPtr<FJsonObject> Obj = Tools[0]->AsObject();
+		TestTrue(TEXT("inputSchema field present even without schema"), Obj->HasField(TEXT("inputSchema")));
+		TestEqual(TEXT("fallback schema is empty object"), Obj->GetObjectField(TEXT("inputSchema"))->Values.Num(), 0);
 	}
 	return true;
 }
