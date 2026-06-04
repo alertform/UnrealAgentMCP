@@ -33,6 +33,7 @@ namespace
 		}
 		return Digest;
 	}
+
 	const TCHAR* LatestProtocolVersion = TEXT("2025-06-18");
 	const TCHAR* SupportedProtocolVersions[] = { TEXT("2025-06-18"), TEXT("2025-03-26") };
 

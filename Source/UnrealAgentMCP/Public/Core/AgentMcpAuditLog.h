@@ -23,7 +23,11 @@ public:
 
 	void Append(const FAgentMcpAuditEntry& Entry);
 
-	/** Last Count lines of today's file, oldest-first. Empty when the file doesn't exist. */
+	/**
+	 * Last Count lines of today's file (audit-YYYYMMDD.jsonl), oldest-first. Empty when the file
+	 * doesn't exist. Entries written before a midnight rollover live in the previous day's file
+	 * and are NOT returned here.
+	 */
 	TArray<FString> Tail(int32 Count) const;
 
 	/** Full path of today's audit file (exists only after the first Append). */
