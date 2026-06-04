@@ -7,6 +7,7 @@
 #include "Core/McpTypes.h"
 #include "Misc/ScopeExit.h"
 #include "Tests/AgentMcpTestHelpers.h"
+#include "WidgetBlueprint.h"
 
 // ---------------------------------------------------------------------------
 // FClassPinDefaultTest
@@ -250,6 +251,119 @@ bool FDeleteAssetTest::RunTest(const FString& Parameters)
 		// Verify gone: FindObject should return null after deletion.
 		UObject* AfterDelete = FindObject<UObject>(nullptr, *ObjPath);
 		TestNull(TEXT("object is null after delete"), AfterDelete);
+	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// FWidgetTreeAuthoringTest
+// Verifies add_widget, list_widgets, set_widget_property.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FWidgetTreeAuthoringTest,
+	"UnrealAgentMCP.P5.WidgetTreeAuthoring",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FWidgetTreeAuthoringTest::RunTest(const FString& Parameters)
+{
+	UWidgetBlueprint* WBP = AgentMcpTestUtils::MakeTransientWidgetBlueprint(TEXT("WBP_McpWidgetTreeTest"));
+	if (!TestNotNull(TEXT("transient WBP created"), WBP))
+	{
+		return true;
+	}
+	const FString Path = WBP->GetPathName();
+	bool bIsError = false;
+
+	// Step 1 — add_widget VerticalBox as root.
+	const TSharedPtr<FJsonObject> AddRoot = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"VerticalBox\",\"widget_name\":\"MenuRoot\",\"as_root\":true}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add_widget VerticalBox succeeds"), bIsError);
+	if (TestNotNull(TEXT("add_widget root payload"), AddRoot.Get()))
+	{
+		TestTrue(TEXT("added:true"), AddRoot->GetBoolField(TEXT("added")));
+		TestEqual(TEXT("name is MenuRoot"), AddRoot->GetStringField(TEXT("name")), FString(TEXT("MenuRoot")));
+	}
+
+	// Step 2 — add_widget Button child of MenuRoot.
+	const TSharedPtr<FJsonObject> AddButton = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"Button\",\"widget_name\":\"HostButton\",\"parent_name\":\"MenuRoot\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add_widget Button succeeds"), bIsError);
+	if (TestNotNull(TEXT("add_widget Button payload"), AddButton.Get()))
+	{
+		TestTrue(TEXT("Button added:true"), AddButton->GetBoolField(TEXT("added")));
+	}
+
+	// Step 3 — add_widget TextBlock child of MenuRoot.
+	const TSharedPtr<FJsonObject> AddText = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"TextBlock\",\"widget_name\":\"StatusLabel\",\"parent_name\":\"MenuRoot\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add_widget TextBlock succeeds"), bIsError);
+	if (TestNotNull(TEXT("add_widget TextBlock payload"), AddText.Get()))
+	{
+		TestTrue(TEXT("TextBlock added:true"), AddText->GetBoolField(TEXT("added")));
+	}
+
+	// Step 4 — list_widgets: count==3, HostButton has parent MenuRoot and is_variable==true.
+	const TSharedPtr<FJsonObject> Listed = AgentMcpTestUtils::CallTool(*this, TEXT("list_widgets"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("list_widgets succeeds"), bIsError);
+	if (TestNotNull(TEXT("list_widgets payload"), Listed.Get()))
+	{
+		TestEqual(TEXT("count==3"), (int32)Listed->GetNumberField(TEXT("count")), 3);
+		bool bFoundButton = false;
+		for (const TSharedPtr<FJsonValue>& Entry : Listed->GetArrayField(TEXT("widgets")))
+		{
+			const TSharedPtr<FJsonObject> W = Entry->AsObject();
+			if (W.IsValid() && W->GetStringField(TEXT("name")) == TEXT("HostButton"))
+			{
+				bFoundButton = true;
+				TestEqual(TEXT("HostButton parent is MenuRoot"), W->GetStringField(TEXT("parent")), FString(TEXT("MenuRoot")));
+				TestTrue(TEXT("HostButton is_variable==true"), W->GetBoolField(TEXT("is_variable")));
+			}
+		}
+		TestTrue(TEXT("HostButton found in list"), bFoundButton);
+	}
+
+	// Step 5 — set_widget_property StatusLabel Text "Hello".
+	const TSharedPtr<FJsonObject> SetProp = AgentMcpTestUtils::CallTool(*this, TEXT("set_widget_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"StatusLabel\",\"property\":\"Text\",\"value\":\"Hello\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("set_widget_property Text succeeds"), bIsError);
+	if (TestNotNull(TEXT("set_widget_property payload"), SetProp.Get()))
+	{
+		TestTrue(TEXT("set:true"), SetProp->GetBoolField(TEXT("set")));
+		TestTrue(TEXT("readback contains Hello"), SetProp->GetStringField(TEXT("value")).Contains(TEXT("Hello"), ESearchCase::IgnoreCase));
+	}
+
+	// Step 6 — add duplicate HostButton -> uniquified name.
+	const TSharedPtr<FJsonObject> AddDup = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"Button\",\"widget_name\":\"HostButton\",\"parent_name\":\"MenuRoot\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add duplicate HostButton succeeds"), bIsError);
+	if (TestNotNull(TEXT("duplicate payload"), AddDup.Get()))
+	{
+		TestTrue(TEXT("dup added:true"), AddDup->GetBoolField(TEXT("added")));
+		TestNotEqual(TEXT("dup name is uniquified"), AddDup->GetStringField(TEXT("name")), FString(TEXT("HostButton")));
+	}
+
+	// Step 7 — set_widget_property on nonexistent widget -> error containing "list_widgets".
+	const FString NoWidgetErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("set_widget_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NoSuchWidget\",\"property\":\"Text\",\"value\":\"x\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("nonexistent widget is error"), bIsError);
+	TestTrue(TEXT("error mentions list_widgets"), NoWidgetErr.Contains(TEXT("list_widgets"), ESearchCase::IgnoreCase));
+
+	// Step 8 — compile_blueprint -> status ok, num_errors 0.
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("compile_blueprint succeeds"), bIsError);
+	if (TestNotNull(TEXT("compile payload"), Compiled.Get()))
+	{
+		TestEqual(TEXT("compile status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
+		TestEqual(TEXT("compile num_errors 0"), (int32)Compiled->GetNumberField(TEXT("num_errors")), 0);
 	}
 
 	return true;

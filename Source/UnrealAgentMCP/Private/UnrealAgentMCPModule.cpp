@@ -13,6 +13,7 @@
 #include "Tools/NodeGraphTools.h"
 #include "Tools/InputTools.h"
 #include "Tools/VariableComponentTools.h"
+#include "Tools/WidgetTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
@@ -28,6 +29,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterActorTools();
 	AgentMcp::Tools::RegisterInputTools();
 	AgentMcp::Tools::RegisterVariableComponentTools();
+	AgentMcp::Tools::RegisterWidgetTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

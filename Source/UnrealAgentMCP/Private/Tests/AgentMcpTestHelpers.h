@@ -4,6 +4,9 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetBlueprintGeneratedClass.h"
+#include "Blueprint/WidgetTree.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
@@ -14,6 +17,7 @@
 #include "Serialization/JsonSerializer.h"
 #include "Server/McpProtocol.h"
 #include "UObject/Package.h"
+#include "WidgetBlueprint.h"
 
 namespace AgentMcpTestUtils
 {
@@ -32,6 +36,21 @@ namespace AgentMcpTestUtils
 		return FKismetEditorUtilities::CreateBlueprint(
 			AActor::StaticClass(), GetTransientPackage(), UniqueName,
 			BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
+	}
+
+	/** Creates a transient WidgetBlueprint (UUserWidget parent) that never touches disk. */
+	inline UWidgetBlueprint* MakeTransientWidgetBlueprint(const TCHAR* BaseName)
+	{
+		const FName UniqueName = MakeUniqueObjectName(GetTransientPackage(), UWidgetBlueprint::StaticClass(), FName(BaseName));
+		UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(FKismetEditorUtilities::CreateBlueprint(
+			UUserWidget::StaticClass(), GetTransientPackage(), UniqueName,
+			BPTYPE_Normal, UWidgetBlueprint::StaticClass(), UWidgetBlueprintGeneratedClass::StaticClass()));
+		// Ensure WidgetTree exists (CreateBlueprint may leave it null for transient packages).
+		if (WBP && !WBP->WidgetTree)
+		{
+			WBP->WidgetTree = NewObject<UWidgetTree>(WBP, NAME_None, RF_Transactional);
+		}
+		return WBP;
 	}
 
 	/** Calls one MCP tool through the full protocol path; returns the parsed JSON payload of content[0].text. */
