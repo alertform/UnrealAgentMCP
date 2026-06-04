@@ -130,4 +130,48 @@ bool FSafetyReadOutputLogTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSafetyUndoRedoTest,
+	"UnrealAgentMCP.Safety.UndoRedoRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FSafetyUndoRedoTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpUndoTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	auto CountNodes = [&]() -> int32
+	{
+		const TSharedPtr<FJsonObject> View = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+		return View.IsValid() ? static_cast<int32>(View->GetNumberField(TEXT("node_count"))) : -1;
+	};
+
+	const int32 Before = CountNodes();
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"branch\"}"), *Path), bIsError);
+	TestFalse(TEXT("add branch ok"), bIsError);
+	TestEqual(TEXT("node added"), CountNodes(), Before + 1);
+
+	const TSharedPtr<FJsonObject> UndoResult = AgentMcpTestUtils::CallTool(*this, TEXT("undo"), TEXT("{}"), bIsError);
+	TestFalse(TEXT("undo tool ok"), bIsError);
+	if (UndoResult.IsValid())
+	{
+		TestTrue(TEXT("undo applied"), UndoResult->GetBoolField(TEXT("undone")));
+	}
+	TestEqual(TEXT("node removed by undo"), CountNodes(), Before);
+
+	const TSharedPtr<FJsonObject> RedoResult = AgentMcpTestUtils::CallTool(*this, TEXT("redo"), TEXT("{}"), bIsError);
+	TestFalse(TEXT("redo tool ok"), bIsError);
+	if (RedoResult.IsValid())
+	{
+		TestTrue(TEXT("redo applied"), RedoResult->GetBoolField(TEXT("redone")));
+	}
+	TestEqual(TEXT("node restored by redo"), CountNodes(), Before + 1);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

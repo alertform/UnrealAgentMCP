@@ -5,6 +5,7 @@
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Editor.h"
 #include "Tools/McpToolUtils.h"
 
 namespace
@@ -37,6 +38,30 @@ namespace
 		Result->SetArrayField(TEXT("lines"), LineValues);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	FAgentMcpToolResult HandleUndo(const TSharedPtr<FJsonObject>& /*Args*/)
+	{
+		if (!GEditor)
+		{
+			return FAgentMcpToolResult::Error(TEXT("GEditor unavailable (not running inside the editor)."));
+		}
+		const bool bUndone = GEditor->UndoTransaction();
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("undone"), bUndone);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	FAgentMcpToolResult HandleRedo(const TSharedPtr<FJsonObject>& /*Args*/)
+	{
+		if (!GEditor)
+		{
+			return FAgentMcpToolResult::Error(TEXT("GEditor unavailable (not running inside the editor)."));
+		}
+		const bool bRedone = GEditor->RedoTransaction();
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("redone"), bRedone);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterEditorSessionTools()
@@ -65,6 +90,28 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 		}
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleReadOutputLog);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("undo");
+		Def.Description = TEXT("Undoes the most recent editor transaction (equivalent to Ctrl+Z) - including this plugin's own MCP: transactions. Returns {undone}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleUndo);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("redo");
+		Def.Description = TEXT("Redoes the most recently undone editor transaction (Ctrl+Y). Returns {redone}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleRedo);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
