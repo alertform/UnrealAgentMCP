@@ -135,6 +135,8 @@ namespace
 						{
 							EventNode->Modify();
 							EnableGhostNode(EventNode);
+							// Enabling a ghost is structural: the node just entered the compile graph.
+							FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 						}
 						return MakeNodeResult(EventNode, /*bExisting=*/true);
 					}
