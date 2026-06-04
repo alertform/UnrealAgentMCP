@@ -6,7 +6,9 @@
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "InputAction.h"
+#include "InputCoreTypes.h"
 #include "InputMappingContext.h"
+#include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "UObject/Package.h"
 
@@ -121,6 +123,61 @@ namespace
 		Result->SetStringField(TEXT("asset_path"), Context->GetPathName());
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	/** Resolves a loaded-or-on-disk asset of T by package/object path. */
+	template <typename TAssetClass>
+	TAssetClass* ResolveInputAsset(const FString& Path, const TCHAR* What, FString& OutError)
+	{
+		FString PackagePath, AssetName;
+		if (!SplitAssetPath(Path, PackagePath, AssetName, OutError))
+		{
+			return nullptr;
+		}
+		const FString ObjectPath = PackagePath + TEXT(".") + AssetName;
+		TAssetClass* Asset = FindObject<TAssetClass>(nullptr, *ObjectPath);
+		if (!Asset)
+		{
+			Asset = LoadObject<TAssetClass>(nullptr, *ObjectPath);
+		}
+		if (!Asset)
+		{
+			OutError = FString::Printf(TEXT("%s not found: '%s'."), What, *Path);
+		}
+		return Asset;
+	}
+
+	FAgentMcpToolResult HandleAddMappingEntry(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString ContextPath, ActionPath, KeyName;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("context_path"), ContextPath) ||
+			!Args->TryGetStringField(TEXT("action_path"), ActionPath) || !Args->TryGetStringField(TEXT("key"), KeyName))
+		{
+			return FAgentMcpToolResult::Error(TEXT("add_mapping_entry requires context_path, action_path and key."));
+		}
+		const FName KeyFName(*KeyName);
+		const ::FKey Key{KeyFName};
+		if (!EKeys::GetKeyDetails(Key).IsValid())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("'%s' is not a valid UE key name. Examples: SpaceBar, W, LeftMouseButton, Gamepad_FaceButton_Bottom, LeftShift."), *KeyName));
+		}
+		FString Error;
+		UInputMappingContext* Context = ResolveInputAsset<UInputMappingContext>(ContextPath, TEXT("Mapping context"), Error);
+		if (!Context) { return FAgentMcpToolResult::Error(Error); }
+		UInputAction* Action = ResolveInputAsset<UInputAction>(ActionPath, TEXT("Input action"), Error);
+		if (!Action) { return FAgentMcpToolResult::Error(Error); }
+
+		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddMappingEntry", "MCP: Add Mapping Entry"));
+		Context->Modify();
+		Context->MapKey(Action, Key);
+		Context->MarkPackageDirty();
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("mapped"), true);
+		Result->SetStringField(TEXT("key"), KeyName);
+		Result->SetNumberField(TEXT("total_mappings"), Context->GetMappings().Num());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterInputTools()
@@ -183,6 +240,46 @@ void AgentMcp::Tools::RegisterInputTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleCreateMappingContext);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// add_mapping_entry
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("add_mapping_entry");
+		Def.Description = TEXT("Maps a key to an input action within an existing UInputMappingContext. "
+			"Args: context_path (required), action_path (required), key (required — UE key name e.g. SpaceBar, W, LeftMouseButton, Gamepad_FaceButton_Bottom, LeftShift). "
+			"Returns {mapped, key, total_mappings}. Use save_asset to persist changes to disk.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> ContextProp = MakeShared<FJsonObject>();
+			ContextProp->SetStringField(TEXT("type"), TEXT("string"));
+			ContextProp->SetStringField(TEXT("description"), TEXT("Absolute asset path of the UInputMappingContext to modify, e.g. /Game/Input/IMC_Default"));
+			Properties->SetObjectField(TEXT("context_path"), ContextProp);
+
+			TSharedRef<FJsonObject> ActionProp = MakeShared<FJsonObject>();
+			ActionProp->SetStringField(TEXT("type"), TEXT("string"));
+			ActionProp->SetStringField(TEXT("description"), TEXT("Absolute asset path of the UInputAction to map, e.g. /Game/Input/IA_Jump"));
+			Properties->SetObjectField(TEXT("action_path"), ActionProp);
+
+			TSharedRef<FJsonObject> KeyProp = MakeShared<FJsonObject>();
+			KeyProp->SetStringField(TEXT("type"), TEXT("string"));
+			KeyProp->SetStringField(TEXT("description"), TEXT("UE key name to bind (e.g. SpaceBar, W, LeftMouseButton, Gamepad_FaceButton_Bottom, LeftShift). Must be a valid EKeys entry."));
+			Properties->SetObjectField(TEXT("key"), KeyProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("context_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("action_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("key")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddMappingEntry);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

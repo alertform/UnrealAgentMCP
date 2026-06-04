@@ -50,4 +50,44 @@ bool FInputAssetCreationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInputMappingEntryTest,
+	"UnrealAgentMCP.Input.AddMappingEntry",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FInputMappingEntryTest::RunTest(const FString& Parameters)
+{
+	bool bIsError = false;
+
+	// Fixture: fresh action + context via the tools themselves.
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_input_action"),
+		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/IA_McpJump\"}"), bIsError);
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_mapping_context"),
+		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/IMC_McpJumpCtx\"}"), bIsError);
+
+	// Map SpaceBar.
+	const TSharedPtr<FJsonObject> Mapped = AgentMcpTestUtils::CallTool(*this, TEXT("add_mapping_entry"),
+		TEXT("{\"context_path\":\"/Game/Dev/AgentMcpTests/IMC_McpJumpCtx\",\"action_path\":\"/Game/Dev/AgentMcpTests/IA_McpJump\",\"key\":\"SpaceBar\"}"), bIsError);
+	TestFalse(TEXT("add_mapping_entry ok"), bIsError);
+	if (TestNotNull(TEXT("mapping payload parses"), Mapped.Get()))
+	{
+		TestEqual(TEXT("one mapping total"), static_cast<int32>(Mapped->GetNumberField(TEXT("total_mappings"))), 1);
+	}
+	// Live verification on the context object.
+	UInputMappingContext* Live = FindObject<UInputMappingContext>(nullptr, TEXT("/Game/Dev/AgentMcpTests/IMC_McpJumpCtx.IMC_McpJumpCtx"));
+	if (TestNotNull(TEXT("live context exists"), Live))
+	{
+		TestEqual(TEXT("live mapping count"), Live->GetMappings().Num(), 1);
+	}
+
+	// Bad key name -> tool error with examples.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_mapping_entry"),
+		TEXT("{\"context_path\":\"/Game/Dev/AgentMcpTests/IMC_McpJumpCtx\",\"action_path\":\"/Game/Dev/AgentMcpTests/IA_McpJump\",\"key\":\"NoSuchKeyXyz\"}"), bIsError);
+	TestTrue(TEXT("bad key is a tool error"), bIsError);
+
+	// Unknown context/action -> tool errors.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_mapping_entry"),
+		TEXT("{\"context_path\":\"/Game/Nope/IMC_X\",\"action_path\":\"/Game/Dev/AgentMcpTests/IA_McpJump\",\"key\":\"W\"}"), bIsError);
+	TestTrue(TEXT("unknown context is a tool error"), bIsError);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
