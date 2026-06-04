@@ -249,6 +249,7 @@ void AgentMcp::Tools::RegisterInputTools()
 		Def.Name = TEXT("add_mapping_entry");
 		Def.Description = TEXT("Maps a key to an input action within an existing UInputMappingContext. "
 			"Args: context_path (required), action_path (required), key (required — UE key name e.g. SpaceBar, W, LeftMouseButton, Gamepad_FaceButton_Bottom, LeftShift). "
+			"Duplicate mappings append a second row (matching editor semantics) — check total_mappings if unsure. "
 			"Returns {mapped, key, total_mappings}. Use save_asset to persist changes to disk.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));

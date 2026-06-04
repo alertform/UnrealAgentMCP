@@ -667,15 +667,13 @@ namespace
 			}
 		}
 
-		// Layer by longest-path depth (Kahn-style; cycle leftovers go to a trailing layer).
+		// Layer by longest-path depth via bounded relaxation (cycle leftovers go to a trailing layer).
 		TMap<UEdGraphNode*, int32> Depth;
-		TArray<UEdGraphNode*> Queue;
 		for (UEdGraphNode* Node : Nodes)
 		{
 			if (Predecessors[Node].Num() == 0)
 			{
 				Depth.Add(Node, 0);
-				Queue.Add(Node);
 			}
 		}
 		// Relaxation passes: depth(node) = max(depth(pred)) + 1. Bounded passes avoid cycle hangs.
