@@ -7,12 +7,12 @@
 
 /** Project Settings > Plugins > Unreal Agent MCP */
 UCLASS(config = Editor, defaultconfig, meta = (DisplayName = "Unreal Agent MCP"))
-class UAgentMcpSettings : public UDeveloperSettings
+class UNREALAGENTMCP_API UAgentMcpSettings : public UDeveloperSettings
 {
 	GENERATED_BODY()
 
 public:
-	virtual FName GetCategoryName() const override { return TEXT("Plugins"); }
+	UAgentMcpSettings();
 
 	/** TCP port for the MCP HTTP endpoint. Bound to loopback only. Change requires editor restart. */
 	UPROPERTY(EditAnywhere, config, Category = "Server", meta = (ClampMin = "1024", ClampMax = "65535"))
