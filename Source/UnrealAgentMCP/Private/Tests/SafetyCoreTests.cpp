@@ -8,6 +8,7 @@
 #include "AgentMcpSettings.h"
 #include "Misc/ScopeExit.h"
 #include "Tests/AgentMcpTestHelpers.h"
+#include "UnrealAgentMCPModule.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSafetyAuditTrailTest,
 	"UnrealAgentMCP.Safety.AuditTrailRecordsCalls",
@@ -99,6 +100,33 @@ bool FSafetyTierEnforcementTest::RunTest(const FString& Parameters)
 	Settings->PermissionTier = EAgentMcpTier::ReadOnly;
 	AgentMcpTestUtils::CallToolRawText(*this, TEXT("compile_blueprint"), TEXT("{\"blueprint_path\":\"/Game/Nope\"}"), bIsError);
 	TestTrue(TEXT("SafeWrite tool rejected at ReadOnly ceiling"), bIsError);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSafetyReadOutputLogTest,
+	"UnrealAgentMCP.Safety.ReadOutputLogCapturesRecentLines",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FSafetyReadOutputLogTest::RunTest(const FString& Parameters)
+{
+	UE_LOG(LogAgentMcp, Display, TEXT("AuditMarker-XYZ123 from SafetyCoreTests"));
+
+	bool bIsError = false;
+	const TSharedPtr<FJsonObject> Payload = AgentMcpTestUtils::CallTool(*this, TEXT("read_output_log"),
+		TEXT("{\"lines\":200,\"filter\":\"AuditMarker-XYZ123\"}"), bIsError);
+	TestFalse(TEXT("read_output_log ok"), bIsError);
+	if (TestNotNull(TEXT("payload parses"), Payload.Get()))
+	{
+		TestTrue(TEXT("marker found"), static_cast<int32>(Payload->GetNumberField(TEXT("returned"))) >= 1);
+	}
+
+	// Category filter narrows to LogAgentMcp lines only.
+	const TSharedPtr<FJsonObject> ByCategory = AgentMcpTestUtils::CallTool(*this, TEXT("read_output_log"),
+		TEXT("{\"lines\":200,\"category\":\"LogAgentMcp\",\"filter\":\"AuditMarker-XYZ123\"}"), bIsError);
+	TestFalse(TEXT("category filter ok"), bIsError);
+	if (ByCategory.IsValid())
+	{
+		TestTrue(TEXT("category filter still finds marker"), static_cast<int32>(ByCategory->GetNumberField(TEXT("returned"))) >= 1);
+	}
 	return true;
 }
 
