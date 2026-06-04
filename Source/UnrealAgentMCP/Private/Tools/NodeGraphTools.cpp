@@ -144,6 +144,11 @@ namespace
 							// Enabling a ghost is structural: the node just entered the compile graph.
 							FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 						}
+						else
+						{
+							// Pure no-op reuse (node already enabled): don't leave an empty undo entry.
+							Transaction.Cancel();
+						}
 						return MakeNodeResult(EventNode, /*bExisting=*/true);
 					}
 				}
