@@ -21,7 +21,9 @@ namespace
 			return TEXT("{}");
 		}
 		FString Digest;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Digest);
+		// Condensed (single-line) policy: the digest lands inside JSONL audit entries.
+		const TSharedRef<TJsonWriter<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>> Writer =
+			TJsonWriterFactory<TCHAR, TCondensedJsonPrintPolicy<TCHAR>>::Create(&Digest);
 		FJsonSerializer::Serialize(Args.ToSharedRef(), Writer);
 		constexpr int32 MaxDigestLen = 512;
 		if (Digest.Len() > MaxDigestLen)
