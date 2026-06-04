@@ -395,25 +395,112 @@ namespace
 		// --- Mutation ---
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetPinDefault", "MCP: Set Pin Default"));
 		Node->Modify();
-		// TrySetDefaultValue is a virtual on UEdGraphSchema (EdGraphSchema.h:899),
-		// overridden by UEdGraphSchema_K2 (EdGraphSchema_K2.h:540).
-		// Calling through the base-class pointer is correct — no cast needed.
-		// Fix 3: detect silent K2 rejection — TrySetDefaultValue has no return value; snapshot-and-compare.
-		const FString OldDefault = Pin->DefaultValue;
-		Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
-		if (Pin->DefaultValue == OldDefault && OldDefault != Value)
+
+		// Dispatch on pin category: class/object/interface pins use TrySetDefaultObject;
+		// soft-reference pins re-route through TrySetDefaultValue (engine handles path string internally);
+		// all other pins use the existing snapshot-compare TrySetDefaultValue path.
+		const FName Cat = Pin->PinType.PinCategory;
+		UClass* MetaClass = Cast<UClass>(Pin->PinType.PinSubCategoryObject.Get());
+
+		if (Cat == UEdGraphSchema_K2::PC_Class)
 		{
-			Transaction.Cancel();
-			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("Schema rejected default value '%s' for pin '%s' (type mismatch, exec pin, container pin, or by-ref pin)."),
-				*Value, *PinName));
+			// Value must be a /Script/Module.Class or /Game/Path/Asset.Asset_C path.
+			UClass* ResolvedClass = LoadObject<UClass>(nullptr, *Value);
+			if (!ResolvedClass)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Could not load class '%s' for class pin '%s'. Use a /Script/Module.Class native class or /Game/Path/Asset.Asset_C generated class."),
+					*Value, *PinName));
+			}
+			if (MetaClass && !ResolvedClass->IsChildOf(MetaClass))
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Class '%s' is not a subclass of '%s' required by pin '%s'."),
+					*ResolvedClass->GetName(), *MetaClass->GetName(), *PinName));
+			}
+			Pin->Modify();
+			Graph->GetSchema()->TrySetDefaultObject(*Pin, ResolvedClass);
+			if (Pin->DefaultObject != ResolvedClass)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Schema rejected class default '%s' on pin '%s'."),
+					*Value, *PinName));
+			}
 		}
+		else if (Cat == UEdGraphSchema_K2::PC_Object || Cat == UEdGraphSchema_K2::PC_Interface)
+		{
+			UObject* ResolvedObj = LoadObject<UObject>(nullptr, *Value);
+			if (!ResolvedObj)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Could not load object '%s' for pin '%s'."),
+					*Value, *PinName));
+			}
+			if (MetaClass && !ResolvedObj->GetClass()->IsChildOf(MetaClass)
+				&& !(Cat == UEdGraphSchema_K2::PC_Interface && ResolvedObj->GetClass()->ImplementsInterface(MetaClass)))
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Object '%s' (class %s) does not satisfy pin '%s' (needs %s)."),
+					*Value, *ResolvedObj->GetClass()->GetName(), *PinName, *GetNameSafe(MetaClass)));
+			}
+			Pin->Modify();
+			Graph->GetSchema()->TrySetDefaultObject(*Pin, ResolvedObj);
+			if (Pin->DefaultObject != ResolvedObj)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Schema rejected object default '%s' on pin '%s'."),
+					*Value, *PinName));
+			}
+		}
+		else if (Cat == UEdGraphSchema_K2::PC_SoftClass || Cat == UEdGraphSchema_K2::PC_SoftObject)
+		{
+			// Soft-reference pins store the value in DefaultValue as a path string.
+			const FString OldSoftDefault = Pin->DefaultValue;
+			Pin->Modify();
+			Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
+			if (Pin->DefaultValue == OldSoftDefault && OldSoftDefault != Value)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Schema rejected soft-reference default '%s' on pin '%s'."),
+					*Value, *PinName));
+			}
+		}
+		else
+		{
+			// TrySetDefaultValue is a virtual on UEdGraphSchema (EdGraphSchema.h:899),
+			// overridden by UEdGraphSchema_K2 (EdGraphSchema_K2.h:540).
+			// Calling through the base-class pointer is correct — no cast needed.
+			// Fix 3: detect silent K2 rejection — TrySetDefaultValue has no return value; snapshot-and-compare.
+			const FString OldDefault = Pin->DefaultValue;
+			Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
+			if (Pin->DefaultValue == OldDefault && OldDefault != Value)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Schema rejected default value '%s' for pin '%s' (type mismatch, exec pin, container pin, or by-ref pin)."),
+					*Value, *PinName));
+			}
+		}
+
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		// Shared success result — report DefaultValue for string pins, DefaultObject path for object pins.
+		const bool bIsObjectPin = (Cat == UEdGraphSchema_K2::PC_Class || Cat == UEdGraphSchema_K2::PC_Object || Cat == UEdGraphSchema_K2::PC_Interface);
+		const FString ReportedValue = bIsObjectPin
+			? (Pin->DefaultObject ? Pin->DefaultObject->GetPathName() : FString())
+			: Pin->DefaultValue;
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("set"), true);
 		Result->SetStringField(TEXT("pin"), PinName);
-		Result->SetStringField(TEXT("value"), Pin->DefaultValue);
+		Result->SetStringField(TEXT("value"), ReportedValue);
 		// Advisory: default is ignored by the compiler while the pin has live connections.
 		if (Pin->LinkedTo.Num() > 0)
 		{
@@ -771,7 +858,7 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("set_pin_default");
-		Def.Description = TEXT("Sets the default value of an input pin. The value is a string and is converted by the K2 schema to the pin's actual type (bool: 'true'/'false', int: '42', float: '3.14', string: the literal text). Note: the default is ignored by the compiler while the pin has live connections. Args: blueprint_path, node_id, pin_name, value (all required); graph_name (optional).");
+		Def.Description = TEXT("Sets the default value of an input pin. The value is a string converted by the K2 schema to the pin's actual type (bool: 'true'/'false', int: '42', float: '3.14', string: the literal text). Class pins (PC_Class) accept '/Script/Module.Class' native paths or '/Game/Path/Asset.Asset_C' generated-class paths and are validated against the pin's required base class. Object/interface pins accept asset paths; soft-reference pins accept path strings. Note: the default is ignored by the compiler while the pin has live connections. Args: blueprint_path, node_id, pin_name, value (all required); graph_name (optional).");
 		Def.InputSchema = MakeSetPinDefaultSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetPinDefault);
