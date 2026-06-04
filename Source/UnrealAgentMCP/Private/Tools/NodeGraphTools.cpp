@@ -85,11 +85,14 @@ namespace
 	/** Converts a ghost (disabled) auto-placed event node into a fully enabled node. */
 	void EnableGhostNode(UEdGraphNode* Node)
 	{
+		// Capture BEFORE SetEnabledState flips the state this check reads.
+		const bool bWasAutoGhost = Node->IsAutomaticallyPlacedGhostNode();
 		Node->SetEnabledState(ENodeEnabledState::Enabled, /*bUserAction=*/false);
-		// Clear the ghost comment ("This node is disabled and will not be called...") so the node
-		// renders as a normal enabled node. bUserSetEnabledState stays false by design — the agent,
-		// not the user, is activating it.
-		if (Node->NodeComment.StartsWith(TEXT("This node is disabled")))
+		// The ghost comment is engine-generated LOCALIZED text ("This node is disabled...", translated
+		// per editor language) — never prefix-match it. Auto-ghost status is the reliable signal; the
+		// comment is engine boilerplate there, safe to clear unconditionally. bUserSetEnabledState
+		// stays false by design — the agent, not the user, is activating it.
+		if (bWasAutoGhost)
 		{
 			Node->NodeComment.Empty();
 		}
@@ -114,7 +117,9 @@ namespace
 		if (Args->TryGetNumberField(TEXT("pos_x"), Number)) { PosX = static_cast<int32>(Number); }
 		if (Args->TryGetNumberField(TEXT("pos_y"), Number)) { PosY = static_cast<int32>(Number); }
 
-		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddNode", "MCP: Add Node"));
+		// Non-const so validation-error paths can Cancel() — otherwise every agent retry on a bad
+		// function/variable name would leave an empty "MCP: Add Node" entry in the undo history.
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddNode", "MCP: Add Node"));
 		Graph->Modify();
 
 		if (NodeType == TEXT("event"))
@@ -122,6 +127,7 @@ namespace
 			FString EventName;
 			if (!Args->TryGetStringField(TEXT("event_name"), EventName))
 			{
+				Transaction.Cancel();
 				return FAgentMcpToolResult::Error(TEXT("node_type 'event' requires 'event_name' (UFunction name, e.g. ReceiveBeginPlay, ReceiveTick)."));
 			}
 			// Reuse an existing event node (including disabled ghost defaults) instead of duplicating.
@@ -149,7 +155,8 @@ namespace
 			UK2Node_Event* NewEvent = FKismetEditorUtilities::AddDefaultEventNode(Blueprint, Graph, FName(*EventName), EventClass, NodePosY);
 			if (!NewEvent)
 			{
-				return FAgentMcpToolResult::Error(FString::Printf(TEXT("Event '%s' not found on parent class '%s'."), *EventName, *GetNameSafe(EventClass)));
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(TEXT("Event '%s' is not available on parent class '%s' (not found, hidden, or disallowed)."), *EventName, *GetNameSafe(EventClass)));
 			}
 			NewEvent->Modify();
 			NewEvent->NodePosX = PosX;
@@ -163,6 +170,7 @@ namespace
 			FString FunctionName;
 			if (!Args->TryGetStringField(TEXT("function_name"), FunctionName))
 			{
+				Transaction.Cancel();
 				return FAgentMcpToolResult::Error(TEXT("node_type 'call_function' requires 'function_name'."));
 			}
 			FString ClassName;
@@ -177,12 +185,14 @@ namespace
 				OwnerClass = UClass::TryFindTypeSlow<UClass>(ClassName);
 				if (!OwnerClass)
 				{
+					Transaction.Cancel();
 					return FAgentMcpToolResult::Error(FString::Printf(TEXT("Class '%s' not found. Use a short name like 'KismetSystemLibrary' or a /Script/ path."), *ClassName));
 				}
 			}
 			UFunction* Function = OwnerClass->FindFunctionByName(FName(*FunctionName));
 			if (!Function)
 			{
+				Transaction.Cancel();
 				return FAgentMcpToolResult::Error(FString::Printf(TEXT("Function '%s' not found on class '%s'."), *FunctionName, *OwnerClass->GetName()));
 			}
 			FGraphNodeCreator<UK2Node_CallFunction> Creator(*Graph);
@@ -199,12 +209,14 @@ namespace
 			FString VariableName;
 			if (!Args->TryGetStringField(TEXT("variable_name"), VariableName))
 			{
+				Transaction.Cancel();
 				return FAgentMcpToolResult::Error(TEXT("variable_get/variable_set require 'variable_name'."));
 			}
 			UClass* OwnerClass = Blueprint->SkeletonGeneratedClass ? Blueprint->SkeletonGeneratedClass.Get() : Blueprint->ParentClass.Get();
 			const FProperty* Property = OwnerClass ? OwnerClass->FindPropertyByName(FName(*VariableName)) : nullptr;
 			if (!Property)
 			{
+				Transaction.Cancel();
 				return FAgentMcpToolResult::Error(FString::Printf(TEXT("Variable '%s' not found on '%s'."), *VariableName, *GetNameSafe(OwnerClass)));
 			}
 			UEdGraphNode* Node = nullptr;
@@ -249,6 +261,7 @@ namespace
 			FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 			return MakeNodeResult(Node, false);
 		}
+		Transaction.Cancel();
 		return FAgentMcpToolResult::Error(FString::Printf(TEXT("Unknown node_type '%s'. Supported: event, call_function, branch, sequence, variable_get, variable_set, self."), *NodeType));
 	}
 
@@ -277,16 +290,7 @@ namespace
 		// Start from the base graph args schema (blueprint_path required, graph_name optional), then
 		// extend the properties object with add_node-specific parameters.
 		TSharedRef<FJsonObject> Schema = MakeGraphArgsSchema();
-		// Retrieve (or re-create) the properties object to add more fields.
-		const TSharedPtr<FJsonObject>* PropertiesPtr = nullptr;
-		if (!Schema->TryGetObjectField(TEXT("properties"), PropertiesPtr) || !PropertiesPtr)
-		{
-			// Fallback: rebuild properties from scratch.
-			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
-			Schema->SetObjectField(TEXT("properties"), Props);
-			PropertiesPtr = nullptr;
-		}
-		// Work directly through Schema API since we can't hold a non-const ref across the TryGetObjectField call.
+		// MakeGraphArgsSchema always sets "properties"; extend that shared object directly.
 		{
 			TSharedRef<FJsonObject> NodeTypeProp = MakeShared<FJsonObject>();
 			NodeTypeProp->SetStringField(TEXT("type"), TEXT("string"));
