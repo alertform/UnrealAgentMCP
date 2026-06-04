@@ -25,4 +25,8 @@ public:
 	/** Maximum permission tier agents may use. Tools above this tier are rejected. Enforced from P3. */
 	UPROPERTY(EditAnywhere, config, Category = "Safety")
 	EAgentMcpTier PermissionTier = EAgentMcpTier::SafeWrite;
+
+	/** Write every tool call (and tier rejection) to Saved/AgentMCP/audit-YYYYMMDD.jsonl. */
+	UPROPERTY(EditAnywhere, config, Category = "Safety")
+	bool bEnableAuditLog = true;
 };

@@ -1,5 +1,6 @@
 #include "Server/McpProtocol.h"
 
+#include "Core/AgentMcpAuditLog.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
@@ -12,6 +13,24 @@
 namespace
 {
 	const TCHAR* JsonRpcVersion = TEXT("2.0");
+
+	FString MakeArgsDigest(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args.IsValid())
+		{
+			return TEXT("{}");
+		}
+		FString Digest;
+		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Digest);
+		FJsonSerializer::Serialize(Args.ToSharedRef(), Writer);
+		constexpr int32 MaxDigestLen = 512;
+		if (Digest.Len() > MaxDigestLen)
+		{
+			Digest.LeftInline(MaxDigestLen);
+			Digest += TEXT("...");
+		}
+		return Digest;
+	}
 	const TCHAR* LatestProtocolVersion = TEXT("2025-06-18");
 	const TCHAR* SupportedProtocolVersions[] = { TEXT("2025-06-18"), TEXT("2025-03-26") };
 
@@ -113,9 +132,16 @@ namespace
 
 		const double StartSeconds = FPlatformTime::Seconds();
 		const FAgentMcpToolResult ToolResult = Tool->Handler.Execute(Args);
+		const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
 		UE_LOG(LogAgentMcp, Display, TEXT("tools/call %s -> %s (%.1f ms)"),
-			*ToolName, ToolResult.bIsError ? TEXT("error") : TEXT("ok"),
-			(FPlatformTime::Seconds() - StartSeconds) * 1000.0);
+			*ToolName, ToolResult.bIsError ? TEXT("error") : TEXT("ok"), ElapsedMs);
+
+		FAgentMcpAuditEntry Audit;
+		Audit.Tool = ToolName;
+		Audit.ArgsDigest = MakeArgsDigest(Args);
+		Audit.bIsError = ToolResult.bIsError;
+		Audit.DurationMs = ElapsedMs;
+		FAgentMcpAuditLog::Get().Append(Audit);
 
 		TSharedRef<FJsonObject> ContentItem = MakeShared<FJsonObject>();
 		ContentItem->SetStringField(TEXT("type"), TEXT("text"));

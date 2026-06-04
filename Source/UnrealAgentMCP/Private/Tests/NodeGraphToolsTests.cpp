@@ -2,69 +2,14 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
-#include "Dom/JsonObject.h"
-#include "Dom/JsonValue.h"
-#include "Engine/Blueprint.h"
-#include "GameFramework/Actor.h"
-#include "Kismet2/KismetEditorUtilities.h"
-#include "Serialization/JsonReader.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
-#include "Server/McpProtocol.h"
-#include "UObject/Package.h"
-
-namespace NodeGraphTestHelpers
-{
-	TSharedPtr<FJsonObject> Parse(const FString& Json)
-	{
-		TSharedPtr<FJsonObject> Obj;
-		const TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Json);
-		FJsonSerializer::Deserialize(Reader, Obj);
-		return Obj;
-	}
-
-	/** Creates a transient Actor blueprint that never touches disk (GC'd after the test run). */
-	UBlueprint* MakeTransientBlueprint(const FString& BaseName)
-	{
-		const FName UniqueName = MakeUniqueObjectName(GetTransientPackage(), UBlueprint::StaticClass(), FName(*BaseName));
-		// NOTE: verify exact CreateBlueprint signature in Kismet2/KismetEditorUtilities.h and adapt
-		// (some 5.x overloads take CallingContext as the last param — default it).
-		return FKismetEditorUtilities::CreateBlueprint(
-			AActor::StaticClass(), GetTransientPackage(), UniqueName,
-			BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
-	}
-
-	/** Calls one MCP tool through the full protocol path; returns the parsed JSON payload of content[0].text. */
-	TSharedPtr<FJsonObject> CallTool(FAutomationTestBase& Test, const FString& ToolName, const FString& ArgsJson, bool& bOutIsError)
-	{
-		const FString Request = FString::Printf(
-			TEXT("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"%s\",\"arguments\":%s}}"),
-			*ToolName, *ArgsJson);
-		const TSharedPtr<FJsonObject> Response = Parse(AgentMcp::Protocol::HandleMessage(Request));
-		bOutIsError = true;
-		if (!Test.TestTrue(FString::Printf(TEXT("%s response has result"), *ToolName),
-			Response.IsValid() && Response->HasField(TEXT("result"))))
-		{
-			return nullptr;
-		}
-		const TSharedPtr<FJsonObject> Result = Response->GetObjectField(TEXT("result"));
-		bOutIsError = Result->GetBoolField(TEXT("isError"));
-		const TArray<TSharedPtr<FJsonValue>>& Content = Result->GetArrayField(TEXT("content"));
-		if (Content.Num() == 0)
-		{
-			return nullptr;
-		}
-		const FString Text = Content[0]->AsObject()->GetStringField(TEXT("text"));
-		return Parse(Text); // nullptr is fine for plain-text error payloads
-	}
-}
+#include "Tests/AgentMcpTestHelpers.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphReadGraphTest,
 	"UnrealAgentMCP.NodeGraph.ReadGraphReturnsEventGraph",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FNodeGraphReadGraphTest::RunTest(const FString& Parameters)
 {
-	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpReadGraphTest"));
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpReadGraphTest"));
 	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
 	{
 		return true;
@@ -72,7 +17,7 @@ bool FNodeGraphReadGraphTest::RunTest(const FString& Parameters)
 	const FString Path = Blueprint->GetPathName();
 
 	bool bIsError = false;
-	const TSharedPtr<FJsonObject> Payload = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> Payload = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 
 	TestFalse(TEXT("read_graph succeeds"), bIsError);
@@ -94,12 +39,12 @@ bool FNodeGraphReadGraphTest::RunTest(const FString& Parameters)
 	}
 
 	// Unknown blueprint path -> tool error, not crash.
-	const TSharedPtr<FJsonObject> BadPayload = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> BadPayload = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		TEXT("{\"blueprint_path\":\"/Game/DoesNotExist/BP_Nope\"}"), bIsError);
 	TestTrue(TEXT("unknown blueprint is a tool error"), bIsError);
 
 	// Unknown graph name -> tool error listing available graphs.
-	const TSharedPtr<FJsonObject> BadGraph = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> BadGraph = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"graph_name\":\"NoSuchGraph\"}"), *Path), bIsError);
 	TestTrue(TEXT("unknown graph is a tool error"), bIsError);
 	return true;
@@ -113,7 +58,7 @@ bool FBlueprintToolsCreateCompileTest::RunTest(const FString& Parameters)
 	bool bIsError = false;
 
 	// create_blueprint creates an in-memory asset (not saved to disk; saving is a P3 tool).
-	const TSharedPtr<FJsonObject> Created = NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+	const TSharedPtr<FJsonObject> Created = AgentMcpTestUtils::CallTool(*this, TEXT("create_blueprint"),
 		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpCreated\",\"parent_class\":\"Actor\"}"), bIsError);
 	TestFalse(TEXT("create_blueprint succeeds"), bIsError);
 	FString CreatedPath;
@@ -124,17 +69,17 @@ bool FBlueprintToolsCreateCompileTest::RunTest(const FString& Parameters)
 	}
 
 	// Duplicate creation must be a tool error, not a crash/overwrite.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_blueprint"),
 		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpCreated\"}"), bIsError);
 	TestTrue(TEXT("duplicate create is a tool error"), bIsError);
 
 	// Unknown parent class -> tool error.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_blueprint"),
 		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpBadParent\",\"parent_class\":\"NoSuchClassXyz\"}"), bIsError);
 	TestTrue(TEXT("unknown parent class is a tool error"), bIsError);
 
 	// compile_blueprint on the freshly created (empty) BP: zero errors, isError false.
-	const TSharedPtr<FJsonObject> Compiled = NodeGraphTestHelpers::CallTool(*this, TEXT("compile_blueprint"),
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *CreatedPath), bIsError);
 	TestFalse(TEXT("compile_blueprint tool succeeds"), bIsError);
 	if (TestNotNull(TEXT("compile payload parses"), Compiled.Get()))
@@ -150,7 +95,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphAddNodeTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 {
-	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpAddNodeTest"));
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpAddNodeTest"));
 	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
 	{
 		return true;
@@ -159,7 +104,7 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 	bool bIsError = false;
 
 	// call_function: KismetSystemLibrary.PrintString
-	const TSharedPtr<FJsonObject> CallNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> CallNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"PrintString\",\"pos_x\":400,\"pos_y\":100}"), *Path), bIsError);
 	TestFalse(TEXT("add call_function succeeds"), bIsError);
 	if (TestNotNull(TEXT("call node payload parses"), CallNode.Get()))
@@ -174,7 +119,7 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 	}
 
 	// event: ReceiveBeginPlay — first call returns an enabled node...
-	const TSharedPtr<FJsonObject> EventNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> EventNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
 	TestFalse(TEXT("add event succeeds"), bIsError);
 	FString FirstEventId;
@@ -183,7 +128,7 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 		FirstEventId = EventNode->GetStringField(TEXT("node_id"));
 	}
 	// ...second call must reuse it (existing: true, same id), never duplicate.
-	const TSharedPtr<FJsonObject> EventAgain = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> EventAgain = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
 	TestFalse(TEXT("re-add event succeeds"), bIsError);
 	if (TestNotNull(TEXT("second event payload parses"), EventAgain.Get()))
@@ -193,7 +138,7 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 	}
 
 	// Extra assertion: the event node must be enabled (not a ghost) so compile and execution work.
-	const TSharedPtr<FJsonObject> GraphAfterEvent = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> GraphAfterEvent = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 	TestFalse(TEXT("read_graph after add event succeeds"), bIsError);
 	if (TestNotNull(TEXT("graph view parses"), GraphAfterEvent.Get()))
@@ -212,21 +157,21 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 	}
 
 	// branch + sequence + self spawn fine.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"branch\"}"), *Path), bIsError);
 	TestFalse(TEXT("add branch succeeds"), bIsError);
-	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"sequence\"}"), *Path), bIsError);
 	TestFalse(TEXT("add sequence succeeds"), bIsError);
-	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"self\"}"), *Path), bIsError);
 	TestFalse(TEXT("add self succeeds"), bIsError);
 
 	// Errors: unknown function / unknown node_type are tool errors.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"NoSuchFunctionXyz\"}"), *Path), bIsError);
 	TestTrue(TEXT("unknown function is a tool error"), bIsError);
-	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"flux_capacitor\"}"), *Path), bIsError);
 	TestTrue(TEXT("unknown node_type is a tool error"), bIsError);
 	return true;
@@ -237,7 +182,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphConnectPinsTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 {
-	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpConnectTest"));
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpConnectTest"));
 	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
 	{
 		return true;
@@ -245,9 +190,9 @@ bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 	const FString Path = Blueprint->GetPathName();
 	bool bIsError = false;
 
-	const TSharedPtr<FJsonObject> EventNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> EventNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
-	const TSharedPtr<FJsonObject> PrintNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> PrintNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"PrintString\"}"), *Path), bIsError);
 	if (!TestNotNull(TEXT("event created"), EventNode.Get()) || !TestNotNull(TEXT("print created"), PrintNode.Get()))
 	{
@@ -257,12 +202,12 @@ bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 	const FString PrintId = PrintNode->GetStringField(TEXT("node_id"));
 
 	// Exec link: BeginPlay.then -> PrintString.execute
-	NodeGraphTestHelpers::CallTool(*this, TEXT("connect_pins"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("connect_pins"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"from_node_id\":\"%s\",\"from_pin\":\"then\",\"to_node_id\":\"%s\",\"to_pin\":\"execute\"}"), *Path, *EventId, *PrintId), bIsError);
 	TestFalse(TEXT("exec connect succeeds"), bIsError);
 
 	// Verify via read_graph that the link is real.
-	const TSharedPtr<FJsonObject> GraphView = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> GraphView = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 	bool bLinkFound = false;
 	if (TestNotNull(TEXT("graph view parses"), GraphView.Get()))
@@ -285,15 +230,15 @@ bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("read_graph shows the exec link"), bLinkFound);
 
 	// Illegal link (exec out -> exec out) must return the schema's reason text.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("connect_pins"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("connect_pins"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"from_node_id\":\"%s\",\"from_pin\":\"then\",\"to_node_id\":\"%s\",\"to_pin\":\"then\"}"), *Path, *EventId, *PrintId), bIsError);
 	TestTrue(TEXT("illegal connect is a tool error"), bIsError);
 
 	// set_pin_default on InString, then verify via read_graph.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("set_pin_default"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_pin_default"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\",\"pin_name\":\"InString\",\"value\":\"Hello from MCP\"}"), *Path, *PrintId), bIsError);
 	TestFalse(TEXT("set_pin_default succeeds"), bIsError);
-	const TSharedPtr<FJsonObject> GraphView2 = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> GraphView2 = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 	bool bDefaultFound = false;
 	if (GraphView2.IsValid())
@@ -317,7 +262,7 @@ bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("read_graph shows the new default"), bDefaultFound);
 
 	// Schema-rejected default (exec pin) must be a tool error, not a silent {"set":true}.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("set_pin_default"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_pin_default"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\",\"pin_name\":\"execute\",\"value\":\"whatever\"}"), *Path, *PrintId), bIsError);
 	TestTrue(TEXT("default on exec pin is a tool error"), bIsError);
 
@@ -330,7 +275,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphClosedLoopTest,
 bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 {
 	// The P2 exit criterion as a test: BeginPlay -> PrintString("Hello from MCP"), compiled clean.
-	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpClosedLoop"));
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpClosedLoop"));
 	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
 	{
 		return true;
@@ -338,9 +283,9 @@ bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 	const FString Path = Blueprint->GetPathName();
 	bool bIsError = false;
 
-	const TSharedPtr<FJsonObject> EventNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> EventNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
-	const TSharedPtr<FJsonObject> PrintNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+	const TSharedPtr<FJsonObject> PrintNode = AgentMcpTestUtils::CallTool(*this, TEXT("add_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"PrintString\",\"pos_x\":400}"), *Path), bIsError);
 	if (!EventNode.IsValid() || !PrintNode.IsValid())
 	{
@@ -350,14 +295,14 @@ bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 	const FString EventId = EventNode->GetStringField(TEXT("node_id"));
 	const FString PrintId = PrintNode->GetStringField(TEXT("node_id"));
 
-	NodeGraphTestHelpers::CallTool(*this, TEXT("connect_pins"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("connect_pins"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"from_node_id\":\"%s\",\"from_pin\":\"then\",\"to_node_id\":\"%s\",\"to_pin\":\"execute\"}"), *Path, *EventId, *PrintId), bIsError);
 	TestFalse(TEXT("connect succeeds"), bIsError);
-	NodeGraphTestHelpers::CallTool(*this, TEXT("set_pin_default"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_pin_default"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\",\"pin_name\":\"InString\",\"value\":\"Hello from MCP\"}"), *Path, *PrintId), bIsError);
 	TestFalse(TEXT("default set succeeds"), bIsError);
 
-	const TSharedPtr<FJsonObject> Compiled = NodeGraphTestHelpers::CallTool(*this, TEXT("compile_blueprint"),
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 	TestFalse(TEXT("compile tool succeeds"), bIsError);
 	if (TestNotNull(TEXT("compile payload parses"), Compiled.Get()))
@@ -366,10 +311,10 @@ bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 	}
 
 	// delete_node removes PrintString; graph shrinks; unknown id errors.
-	NodeGraphTestHelpers::CallTool(*this, TEXT("delete_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("delete_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\"}"), *Path, *PrintId), bIsError);
 	TestFalse(TEXT("delete succeeds"), bIsError);
-	const TSharedPtr<FJsonObject> GraphView = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+	const TSharedPtr<FJsonObject> GraphView = AgentMcpTestUtils::CallTool(*this, TEXT("read_graph"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
 	if (GraphView.IsValid())
 	{
@@ -378,7 +323,7 @@ bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 			TestNotEqual(TEXT("PrintString node is gone"), NodeValue->AsObject()->GetStringField(TEXT("id")), PrintId);
 		}
 	}
-	NodeGraphTestHelpers::CallTool(*this, TEXT("delete_node"),
+	AgentMcpTestUtils::CallTool(*this, TEXT("delete_node"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\"}"), *Path, *PrintId), bIsError);
 	TestTrue(TEXT("double delete is a tool error"), bIsError);
 
