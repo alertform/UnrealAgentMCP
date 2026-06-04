@@ -145,7 +145,7 @@ namespace
 		const FName VarFName(*VariableName);
 		if (!VariableExists(Blueprint, VarFName))
 		{
-			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Variable '%s' not found in blueprint '%s'. Call add_variable first."), *VariableName, *Blueprint->GetName()));
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Variable '%s' is not a Blueprint-defined variable on '%s'. Only Blueprint-defined variables can have flags set (inherited C++ properties cannot); for a new variable call add_variable first."), *VariableName, *Blueprint->GetName()));
 		}
 
 		// ── read optional flag args ───────────────────────────────────────────────
@@ -161,6 +161,9 @@ namespace
 
 		// ── transaction + mutation ────────────────────────────────────────────────
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetVariableFlags", "MCP: Set Variable Flags"));
+		// The UBlueprintEditorLibrary setters mutate Blueprint->NewVariables directly WITHOUT calling
+		// Blueprint->Modify() — without this line the flag changes would not be undoable.
+		Blueprint->Modify();
 
 		if (bHasInstanceEditable)
 		{
@@ -187,7 +190,7 @@ void AgentMcp::Tools::RegisterVariableComponentTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("add_variable");
-		Def.Description = TEXT("Adds a new member variable to a Blueprint. type supports: bool, int, real, string, name, text, byte, object:ClassName (soft object ref), class:ClassName (class ref). default_value uses UE ImportText syntax (e.g. 42.5, True, None). Wrapped in an undo transaction. Returns {added:true, variable, type}.");
+		Def.Description = TEXT("Adds a new member variable to a Blueprint. type supports: bool, int, real, string, name, text, byte, object:ClassName (soft object ref), class:ClassName (class ref). default_value uses UE ImportText syntax (e.g. 42.5, True, None) - not applied for object:/class: reference types. Wrapped in an undo transaction. Returns {added:true, variable, type}.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
