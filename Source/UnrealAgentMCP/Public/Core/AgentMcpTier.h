@@ -3,7 +3,7 @@
 #include "CoreMinimal.h"
 #include "AgentMcpTier.generated.h"
 
-/** Permission tier of an MCP tool. Calls above the configured ceiling are rejected (enforcement lands in P3). */
+/** Permission tier of an MCP tool. Calls above the configured ceiling are rejected at the dispatch seam. */
 UENUM()
 enum class EAgentMcpTier : uint8
 {
@@ -14,6 +14,12 @@ enum class EAgentMcpTier : uint8
 	/** Irreversible or disk-level operations (delete asset, arbitrary console command). */
 	Destructive = 2,
 };
+
+// Tier enforcement compares ordinals (Tool->Tier > Ceiling). Inserting or reordering values would
+// silently break the security gate — this assert turns that into a compile error.
+static_assert(EAgentMcpTier::ReadOnly < EAgentMcpTier::SafeWrite
+           && EAgentMcpTier::SafeWrite < EAgentMcpTier::Destructive,
+	"Tier enforcement relies on ReadOnly < SafeWrite < Destructive ordinal ordering");
 
 namespace AgentMcp
 {

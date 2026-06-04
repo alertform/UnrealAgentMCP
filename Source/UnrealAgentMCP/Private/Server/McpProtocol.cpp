@@ -74,8 +74,10 @@ namespace
 	}
 
 	/** Builds a tools/call result response from an FAgentMcpToolResult — shared by the normal-execute
-	 *  path and the tier-rejection path so both produce byte-identical envelope shape. */
-	FString MakeToolResultResponse(const TSharedPtr<FJsonValue>& Id, const FAgentMcpToolResult& ToolResult)
+	 *  path and the tier-rejection path. bRejectedByTier adds a structured discriminator field so
+	 *  agents can branch on policy rejections without parsing message text (extra result fields are
+	 *  legal per the MCP tools/call result schema). */
+	FString MakeToolResultResponse(const TSharedPtr<FJsonValue>& Id, const FAgentMcpToolResult& ToolResult, bool bRejectedByTier = false)
 	{
 		TSharedRef<FJsonObject> ContentItem = MakeShared<FJsonObject>();
 		ContentItem->SetStringField(TEXT("type"), TEXT("text"));
@@ -87,6 +89,10 @@ namespace
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetArrayField(TEXT("content"), Content);
 		Result->SetBoolField(TEXT("isError"), ToolResult.bIsError);
+		if (bRejectedByTier)
+		{
+			Result->SetBoolField(TEXT("rejected_by_tier"), true);
+		}
 		return MakeResultResponse(Id, Result);
 	}
 
@@ -152,7 +158,9 @@ namespace
 		Params->TryGetObjectField(TEXT("arguments"), ArgsPtr);
 		const TSharedPtr<FJsonObject> Args = ArgsPtr ? *ArgsPtr : nullptr;
 
-		// Single enforcement seam: every tool call passes through here (P2 final review).
+		// Single enforcement seam: every tool call passes through here (P2 final review). If a second
+		// execution path is ever added (batch endpoint, resources), route it through this gate — the
+		// check is bound to this handler, not to Handler.Execute itself.
 		const UAgentMcpSettings* Settings = GetDefault<UAgentMcpSettings>();
 		if (Tool->Tier > Settings->PermissionTier)
 		{
@@ -168,7 +176,7 @@ namespace
 			const FAgentMcpToolResult Rejected = FAgentMcpToolResult::Error(FString::Printf(
 				TEXT("Tool '%s' requires permission tier '%s' but the server ceiling is '%s'. If intended, raise it under Project Settings > Plugins > Unreal Agent MCP."),
 				*ToolName, AgentMcp::TierToString(Tool->Tier), AgentMcp::TierToString(Settings->PermissionTier)));
-			return MakeToolResultResponse(Id, Rejected);
+			return MakeToolResultResponse(Id, Rejected, /*bRejectedByTier=*/true);
 		}
 
 		const double StartSeconds = FPlatformTime::Seconds();

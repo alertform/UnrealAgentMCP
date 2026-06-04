@@ -68,6 +68,11 @@ bool FSafetyTierEnforcementTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("rejection names current ceiling"), Rejection.Contains(TEXT("SafeWrite")));
 	TestTrue(TEXT("rejection points at settings"), Rejection.Contains(TEXT("Project Settings")));
 
+	// Wire-level structured discriminator: agents branch on this field, not on message text.
+	const FString RawRejection = AgentMcp::Protocol::HandleMessage(
+		TEXT("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"test_destructive_dummy\"}}"));
+	TestTrue(TEXT("rejection result carries rejected_by_tier field"), RawRejection.Contains(TEXT("\"rejected_by_tier\":true")));
+
 	// Rejection must be audited with rejected_by_tier.
 	bool bAudited = false;
 	for (const FString& Line : FAgentMcpAuditLog::Get().Tail(20))
