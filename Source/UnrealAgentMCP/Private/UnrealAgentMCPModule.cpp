@@ -6,6 +6,7 @@
 #include "Server/McpHttpServer.h"
 #include "Tools/AssetQueryTools.h"
 #include "Tools/EditorInfoTools.h"
+#include "Tools/BlueprintTools.h"
 #include "Tools/NodeGraphTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
@@ -17,6 +18,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterEditorInfoTools();
 	AgentMcp::Tools::RegisterAssetQueryTools();
 	AgentMcp::Tools::RegisterNodeGraphTools();
+	AgentMcp::Tools::RegisterBlueprintTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 
 	const UAgentMcpSettings* Settings = GetDefault<UAgentMcpSettings>();

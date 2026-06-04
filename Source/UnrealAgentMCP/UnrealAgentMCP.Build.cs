@@ -21,6 +21,7 @@ public class UnrealAgentMCP : ModuleRules
 			"AssetRegistry",
 			"BlueprintGraph",
 			"UnrealEd",
+			"BlueprintEditorLibrary",
 		});
 	}
 }

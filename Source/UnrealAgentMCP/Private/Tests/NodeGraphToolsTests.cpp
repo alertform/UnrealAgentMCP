@@ -105,4 +105,44 @@ bool FNodeGraphReadGraphTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintToolsCreateCompileTest,
+	"UnrealAgentMCP.NodeGraph.CreateAndCompileBlueprint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FBlueprintToolsCreateCompileTest::RunTest(const FString& Parameters)
+{
+	bool bIsError = false;
+
+	// create_blueprint creates an in-memory asset (not saved to disk; saving is a P3 tool).
+	const TSharedPtr<FJsonObject> Created = NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpCreated\",\"parent_class\":\"Actor\"}"), bIsError);
+	TestFalse(TEXT("create_blueprint succeeds"), bIsError);
+	FString CreatedPath;
+	if (TestNotNull(TEXT("create payload parses"), Created.Get()))
+	{
+		CreatedPath = Created->GetStringField(TEXT("blueprint_path"));
+		TestTrue(TEXT("created path echoes asset path"), CreatedPath.Contains(TEXT("BP_McpCreated")));
+	}
+
+	// Duplicate creation must be a tool error, not a crash/overwrite.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpCreated\"}"), bIsError);
+	TestTrue(TEXT("duplicate create is a tool error"), bIsError);
+
+	// Unknown parent class -> tool error.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("create_blueprint"),
+		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpBadParent\",\"parent_class\":\"NoSuchClassXyz\"}"), bIsError);
+	TestTrue(TEXT("unknown parent class is a tool error"), bIsError);
+
+	// compile_blueprint on the freshly created (empty) BP: zero errors, isError false.
+	const TSharedPtr<FJsonObject> Compiled = NodeGraphTestHelpers::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *CreatedPath), bIsError);
+	TestFalse(TEXT("compile_blueprint tool succeeds"), bIsError);
+	if (TestNotNull(TEXT("compile payload parses"), Compiled.Get()))
+	{
+		TestEqual(TEXT("no compile errors"), static_cast<int32>(Compiled->GetNumberField(TEXT("num_errors"))), 0);
+		TestEqual(TEXT("status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
