@@ -7,7 +7,12 @@
 struct FHttpServerRequest;
 class IHttpRouter;
 
-/** Owns the /mcp HTTP route. Loopback only (engine HTTPServer default bind is localhost). */
+/**
+ * Owns the /mcp HTTP route. Binds via the engine HTTPServer module, whose DefaultBindAddress
+ * defaults to localhost — NOT enforced here. An ini override ([HTTPServer.Listeners]) could widen
+ * exposure; the P1 smoke checklist netstat-verifies 127.0.0.1. TODO(P3): programmatically refuse
+ * non-loopback bind before destructive tools land.
+ */
 class FMcpHttpServer
 {
 public:

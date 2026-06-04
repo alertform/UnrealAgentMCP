@@ -12,6 +12,13 @@
 bool FMcpHttpServer::Start(uint32 Port)
 {
 	FHttpServerModule& HttpServerModule = FHttpServerModule::Get();
+
+	// StartAllListeners must precede GetHttpRouter: the engine only attempts the actual socket
+	// bind once listeners are enabled. Calling GetHttpRouter(bFailOnBindFailure=true) before
+	// enabling them defers the bind into StartAllListeners(), which swallows failures — Start()
+	// would report success with no socket bound (UE 5.5 HttpServerModule.cpp:54,158-179).
+	HttpServerModule.StartAllListeners();
+
 	Router = HttpServerModule.GetHttpRouter(Port, /*bFailOnBindFailure*/ true);
 	if (!Router.IsValid())
 	{
@@ -28,7 +35,6 @@ bool FMcpHttpServer::Start(uint32 Port)
 		return false;
 	}
 
-	HttpServerModule.StartAllListeners();
 	UE_LOG(LogAgentMcp, Display, TEXT("MCP server listening on http://127.0.0.1:%u/mcp"), Port);
 	return true;
 }
@@ -45,6 +51,8 @@ void FMcpHttpServer::Stop()
 
 bool FMcpHttpServer::HandleRequest(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
+	// TODO(P2): enforce Content-Type: application/json (415 otherwise). P1 is deliberately lenient —
+	// non-JSON bodies fall through to the protocol layer's -32700 parse error.
 	const FUTF8ToTCHAR Converter(reinterpret_cast<const ANSICHAR*>(Request.Body.GetData()), Request.Body.Num());
 	const FString Body(Converter.Length(), Converter.Get());
 
