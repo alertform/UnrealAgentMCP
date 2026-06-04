@@ -23,6 +23,8 @@ public class UnrealAgentMCP : ModuleRules
 			"UnrealEd",
 			"BlueprintEditorLibrary",
 			"SubobjectDataInterface",
+			"EnhancedInput",
+			"InputCore",
 		});
 	}
 }

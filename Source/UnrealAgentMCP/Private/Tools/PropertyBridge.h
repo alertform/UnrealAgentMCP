@@ -19,6 +19,11 @@ namespace AgentMcp::PropertyBridge
 	 * bRejectTemplateDisabled: pass true when Container is a CDO/archetype — rejects EditInstanceOnly
 	 * properties (CPF_DisableEditOnTemplate), matching what the Details panel allows on templates.
 	 * Instance callers (actors, components) leave it false: EditInstanceOnly is legal there.
+	 *
+	 * KNOWN LIMITATIONS (whole-value semantics only):
+	 * - Containers (TArray/TSet/TMap) are replaced wholesale via ImportText syntax "(a,b,c)";
+	 *   single-element insert/remove and TMap key addressing are not supported.
+	 * - Delegate / multicast-delegate properties cannot be meaningfully set via text import.
 	 */
 	bool SetPropertyFromString(UObject* Container, const FString& PropertyName, const FString& Value, FString& OutError, bool bRejectTemplateDisabled = false);
 }
