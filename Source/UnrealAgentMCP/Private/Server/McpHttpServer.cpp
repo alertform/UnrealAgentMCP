@@ -52,8 +52,17 @@ void FMcpHttpServer::Stop()
 bool FMcpHttpServer::HandleRequest(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
 	// Editor mutation APIs (FScopedTransaction, K2 node ops) require the game thread. The engine
-	// HTTPServer ticks listeners on the game thread (verified P1 review); assert the assumption.
-	check(IsInGameThread());
+	// HTTPServer ticks listeners on the game thread (verified against 5.5 LaunchEngineLoop/FTSTicker
+	// in the P1 review). If a future engine changes dispatch, degrade gracefully instead of killing
+	// the editor: refuse the request with a JSON-RPC internal error (building JSON touches no editor state).
+	if (!ensureMsgf(IsInGameThread(), TEXT("MCP HandleRequest dispatched off the game thread; refusing request")))
+	{
+		TUniquePtr<FHttpServerResponse> ErrorResponse = FHttpServerResponse::Create(
+			TEXT("{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32603,\"message\":\"Server thread-affinity violation; request refused\"}}"),
+			TEXT("application/json"));
+		OnComplete(MoveTemp(ErrorResponse));
+		return true;
+	}
 
 	// TODO(P2): enforce Content-Type: application/json (415 otherwise). P1 is deliberately lenient —
 	// non-JSON bodies fall through to the protocol layer's -32700 parse error.
