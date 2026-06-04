@@ -153,6 +153,66 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
+	FAgentMcpToolResult HandleReparentBlueprint(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString Error;
+		UBlueprint* Blueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, Error);
+		if (!Blueprint)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		FString NewParentClassName;
+		if (!Args->TryGetStringField(TEXT("new_parent_class"), NewParentClassName))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'new_parent_class'."));
+		}
+
+		// Resolve class by short name or full path.
+		UClass* NewClass = nullptr;
+		if (NewParentClassName.Contains(TEXT(".")))
+		{
+			NewClass = FindObject<UClass>(nullptr, *NewParentClassName);
+		}
+		if (!NewClass)
+		{
+			NewClass = UClass::TryFindTypeSlow<UClass>(NewParentClassName);
+		}
+		if (!NewClass)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Class '%s' not found. Use a short name like 'Pawn' or a full path like '/Script/Engine.Pawn'."), *NewParentClassName));
+		}
+
+		// Cycle guard: prevent reparenting to the blueprint's own generated class or a subclass of it.
+		if (Blueprint->GeneratedClass && NewClass->IsChildOf(Blueprint->GeneratedClass))
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Reparenting to '%s' would create an inheritance cycle (it is a child of this blueprint's generated class)."), *NewParentClassName));
+		}
+
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "ReparentBlueprint", "MCP: Reparent Blueprint"));
+
+		// ReparentBlueprint is void — verify effect via ParentClass afterwards.
+		UBlueprintEditorLibrary::ReparentBlueprint(Blueprint, NewClass);
+
+		if (Blueprint->ParentClass != NewClass)
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("ReparentBlueprint did not take effect for class '%s'. The class may not be Blueprintable or compatible."), *NewParentClassName));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("reparented"), true);
+		Result->SetStringField(TEXT("new_parent"), NewClass->GetPathName());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 	FAgentMcpToolResult HandleSetCdoProperty(const TSharedPtr<FJsonObject>& Args)
 	{
 		UBlueprint* Blueprint = nullptr;
@@ -292,6 +352,32 @@ void AgentMcp::Tools::RegisterBlueprintTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetCdoProperty);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("reparent_blueprint");
+		Def.Description = TEXT("Changes the parent class of a Blueprint. DANGEROUS for established blueprints: existing nodes/variables referencing the old parent may break - always compile_blueprint afterwards and read the messages. Args: blueprint_path (required), new_parent_class (required, short name like 'Pawn' or full path like '/Script/Engine.Pawn'). Returns {reparented, new_parent}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
+			PathProp->SetStringField(TEXT("type"), TEXT("string"));
+			PathProp->SetStringField(TEXT("description"), TEXT("Path of the Blueprint to reparent, e.g. /Game/Dev/BP_MyActor"));
+			Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
+			TSharedRef<FJsonObject> ClassProp = MakeShared<FJsonObject>();
+			ClassProp->SetStringField(TEXT("type"), TEXT("string"));
+			ClassProp->SetStringField(TEXT("description"), TEXT("New parent class: short name (Pawn, Character) or full path (/Script/Engine.Pawn). Must be Blueprintable."));
+			Properties->SetObjectField(TEXT("new_parent_class"), ClassProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("new_parent_class")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleReparentBlueprint);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

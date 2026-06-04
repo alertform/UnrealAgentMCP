@@ -343,4 +343,39 @@ bool FToolFamiliesNativeComponentGuardTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FToolFamiliesReparentTest,
+	"UnrealAgentMCP.ToolFamilies.ReparentBlueprint",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FToolFamiliesReparentTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpReparentTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	// Actor -> Pawn is a legal reparent.
+	const TSharedPtr<FJsonObject> Reparented = AgentMcpTestUtils::CallTool(*this, TEXT("reparent_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"new_parent_class\":\"Pawn\"}"), *Path), bIsError);
+	TestFalse(TEXT("reparent ok"), bIsError);
+	if (Reparented.IsValid())
+	{
+		TestTrue(TEXT("new parent echoed"), Reparented->GetStringField(TEXT("new_parent")).Contains(TEXT("Pawn")));
+	}
+	// Compile clean after reparent; CDO now has Pawn-only property.
+	AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	const TSharedPtr<FJsonObject> Got = AgentMcpTestUtils::CallTool(*this, TEXT("get_cdo_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"property\":\"bUseControllerRotationYaw\"}"), *Path), bIsError);
+	TestFalse(TEXT("Pawn-only property readable after reparent"), bIsError);
+
+	// Unknown class -> tool error.
+	AgentMcpTestUtils::CallTool(*this, TEXT("reparent_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"new_parent_class\":\"NoSuchParentXyz\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown parent is a tool error"), bIsError);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
