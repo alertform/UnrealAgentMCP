@@ -13,6 +13,7 @@ namespace
 {
 	FString DescribeAvailableGraphs(const UBlueprint* Blueprint)
 	{
+		// MacroGraphs/DelegateSignatureGraphs are intentionally omitted: they are not node-editing targets in P2.
 		TArray<FString> Names;
 		for (const TObjectPtr<UEdGraph>& Graph : Blueprint->UbergraphPages)
 		{
@@ -28,7 +29,13 @@ namespace
 
 UBlueprint* AgentMcp::NodeGraphUtils::ResolveBlueprint(const FString& Path, FString& OutError)
 {
+	if (Path.StartsWith(TEXT("/Script/")))
+	{
+		OutError = FString::Printf(TEXT("'%s' is a native class path, not a Blueprint asset path. Use a /Game/... path."), *Path);
+		return nullptr;
+	}
 	FString ObjectPath = Path;
+	ObjectPath.RemoveFromEnd(TEXT("/"));
 	if (!ObjectPath.Contains(TEXT(".")))
 	{
 		FString Leaf;
@@ -36,7 +43,7 @@ UBlueprint* AgentMcp::NodeGraphUtils::ResolveBlueprint(const FString& Path, FStr
 		{
 			Leaf = ObjectPath;
 		}
-		ObjectPath = FString::Printf(TEXT("%s.%s"), *Path, *Leaf);
+		ObjectPath = FString::Printf(TEXT("%s.%s"), *ObjectPath, *Leaf);
 	}
 
 	UBlueprint* Blueprint = FindObject<UBlueprint>(nullptr, *ObjectPath);
@@ -53,6 +60,8 @@ UBlueprint* AgentMcp::NodeGraphUtils::ResolveBlueprint(const FString& Path, FStr
 
 UEdGraph* AgentMcp::NodeGraphUtils::ResolveGraph(UBlueprint* Blueprint, const FString& GraphName, FString& OutError)
 {
+	// "EventGraph" is a sentinel alias for UbergraphPages[0] regardless of the page's actual name,
+	// matching the editor convention that the primary event graph is always first.
 	if (GraphName.IsEmpty() || GraphName == TEXT("EventGraph"))
 	{
 		if (Blueprint->UbergraphPages.Num() > 0)
@@ -115,6 +124,9 @@ UEdGraphPin* AgentMcp::NodeGraphUtils::FindPin(UEdGraphNode* Node, const FString
 	}
 	if (Fallback)
 	{
+		// Direction mismatch: the only pin with this name has the opposite direction. Return it so
+		// read paths still work, but surface the mismatch for write-path callers/diagnostics.
+		OutError = FString::Printf(TEXT("Pin '%s' exists but its direction does not match the preferred direction; verify with read_graph."), *PinName);
 		return Fallback;
 	}
 	TArray<FString> Names;
@@ -184,6 +196,8 @@ TSharedRef<FJsonObject> AgentMcp::NodeGraphUtils::GraphToJson(const UBlueprint* 
 	TSharedRef<FJsonObject> Json = MakeShared<FJsonObject>();
 	Json->SetStringField(TEXT("blueprint"), Blueprint->GetPathName());
 	Json->SetStringField(TEXT("graph"), Graph->GetName());
+	// TODO(P3): add a node-count cap (cf. list_assets limit) before this runs against
+	// production-scale graphs; P2 test blueprints are intentionally small.
 	TArray<TSharedPtr<FJsonValue>> Nodes;
 	for (const UEdGraphNode* Node : Graph->Nodes)
 	{

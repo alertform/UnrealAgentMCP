@@ -78,7 +78,8 @@ bool FNodeGraphReadGraphTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("read_graph succeeds"), bIsError);
 	if (TestNotNull(TEXT("payload parses as JSON"), Payload.Get()))
 	{
-		TestEqual(TEXT("graph is EventGraph"), Payload->GetStringField(TEXT("graph")), FString(TEXT("EventGraph")));
+		// Engine may suffix the ubergraph name (EventGraph_0) under name pressure; assert the family, not the literal.
+		TestTrue(TEXT("graph is an event graph"), Payload->GetStringField(TEXT("graph")).StartsWith(TEXT("EventGraph")));
 		TestTrue(TEXT("has nodes array"), Payload->HasField(TEXT("nodes")));
 		// A fresh Actor BP's event graph contains ghost default events (BeginPlay/Tick/ActorBeginOverlap).
 		const TArray<TSharedPtr<FJsonValue>>& Nodes = Payload->GetArrayField(TEXT("nodes"));

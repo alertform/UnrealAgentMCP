@@ -49,7 +49,7 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(NodeGraphUtils::GraphToJson(Blueprint, Graph)));
 	}
 
-	TSharedRef<FJsonObject> MakeGraphArgsSchema(const TCHAR* ExtraPropsDescription)
+	TSharedRef<FJsonObject> MakeGraphArgsSchema()
 	{
 		TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
 		Schema->SetStringField(TEXT("type"), TEXT("object"));
@@ -63,8 +63,6 @@ namespace
 		GraphProp->SetStringField(TEXT("description"), TEXT("Graph name; defaults to the event graph"));
 		Properties->SetObjectField(TEXT("graph_name"), GraphProp);
 		Schema->SetObjectField(TEXT("properties"), Properties);
-		// ExtraPropsDescription is appended to the tool description, not the schema; kept for call-site clarity.
-		(void)ExtraPropsDescription;
 		return Schema;
 	}
 }
@@ -75,7 +73,7 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("read_graph");
 		Def.Description = TEXT("Reads a Blueprint graph as JSON: nodes with ids, classes, titles, pins (name/direction/type/default) and links. Always call this before and after editing to see real graph state. Args: blueprint_path (required), graph_name (default EventGraph).");
-		Def.InputSchema = MakeGraphArgsSchema(TEXT(""));
+		Def.InputSchema = MakeGraphArgsSchema();
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleReadGraph);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
