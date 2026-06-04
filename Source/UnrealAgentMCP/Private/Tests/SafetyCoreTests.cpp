@@ -69,9 +69,17 @@ bool FSafetyTierEnforcementTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("rejection points at settings"), Rejection.Contains(TEXT("Project Settings")));
 
 	// Wire-level structured discriminator: agents branch on this field, not on message text.
+	// Parse rather than substring-match — the response writer's print policy is not our contract.
 	const FString RawRejection = AgentMcp::Protocol::HandleMessage(
 		TEXT("{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"test_destructive_dummy\"}}"));
-	TestTrue(TEXT("rejection result carries rejected_by_tier field"), RawRejection.Contains(TEXT("\"rejected_by_tier\":true")));
+	const TSharedPtr<FJsonObject> RawObj = AgentMcpTestUtils::Parse(RawRejection);
+	bool bDiscriminatorPresent = false;
+	if (RawObj.IsValid() && RawObj->HasField(TEXT("result")))
+	{
+		const TSharedPtr<FJsonObject> ResultObj = RawObj->GetObjectField(TEXT("result"));
+		bDiscriminatorPresent = ResultObj->HasField(TEXT("rejected_by_tier")) && ResultObj->GetBoolField(TEXT("rejected_by_tier"));
+	}
+	TestTrue(TEXT("rejection result carries rejected_by_tier field"), bDiscriminatorPresent);
 
 	// Rejection must be audited with rejected_by_tier.
 	bool bAudited = false;
