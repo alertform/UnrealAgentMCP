@@ -88,7 +88,7 @@ namespace
 		return Result;
 	}
 
-	// Returns response string directly because unknown-tool is a protocol error, not a tool result.
+	// Returns response string directly because unknown-tool is a protocol error (-32602 per MCP tools/call spec), not a tool result.
 	FString HandleToolsCall(const TSharedPtr<FJsonValue>& Id, const TSharedPtr<FJsonObject>& Params)
 	{
 		if (!Params.IsValid())
@@ -140,6 +140,8 @@ FString AgentMcp::Protocol::HandleMessage(const FString& RequestBody)
 		return MakeErrorResponse(nullptr, ParseErrorCode, TEXT("Request body is not valid JSON"));
 	}
 
+	// id is echoed verbatim without JSON-type validation (lenient for P1). Note: explicit "id":null parses
+	// to a valid FJsonValueNull => request; only an ABSENT id field makes the message a notification.
 	const TSharedPtr<FJsonValue> Id = Root->TryGetField(TEXT("id"));
 	const bool bIsNotification = !Id.IsValid();
 

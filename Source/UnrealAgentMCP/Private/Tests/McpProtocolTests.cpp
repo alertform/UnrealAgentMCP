@@ -105,4 +105,38 @@ bool FMcpProtocolNotificationTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpProtocolIdEdgeCasesTest,
+	"UnrealAgentMCP.Protocol.IdEdgeCases",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FMcpProtocolIdEdgeCasesTest::RunTest(const FString& Parameters)
+{
+	// Missing jsonrpc field with a valid method and id -> -32600, not silence.
+	{
+		const FString Response = AgentMcp::Protocol::HandleMessage(TEXT("{\"id\":9,\"method\":\"ping\"}"));
+		TestEqual(TEXT("missing jsonrpc is invalid request"),
+			McpProtocolTestHelpers::GetErrorCode(McpProtocolTestHelpers::Parse(Response)), -32600);
+	}
+	// Explicit id:null is a REQUEST (gets a response with id null), not a notification.
+	{
+		const FString Response = AgentMcp::Protocol::HandleMessage(TEXT("{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"ping\"}"));
+		TestFalse(TEXT("id:null ping gets a response"), Response.IsEmpty());
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(Response);
+		TestTrue(TEXT("response has result"), Obj.IsValid() && Obj->HasField(TEXT("result")));
+		if (Obj.IsValid())
+		{
+			const TSharedPtr<FJsonValue> IdField = Obj->TryGetField(TEXT("id"));
+			TestTrue(TEXT("id field present and null"), IdField.IsValid() && IdField->Type == EJson::Null);
+		}
+	}
+	// String id round-trips with its type preserved.
+	{
+		const FString Response = AgentMcp::Protocol::HandleMessage(TEXT("{\"jsonrpc\":\"2.0\",\"id\":\"req-abc\",\"method\":\"ping\"}"));
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(Response);
+		FString IdString;
+		TestTrue(TEXT("string id echoed as string"), Obj.IsValid() && Obj->TryGetStringField(TEXT("id"), IdString));
+		TestEqual(TEXT("string id value round-trips"), IdString, FString(TEXT("req-abc")));
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
