@@ -630,6 +630,115 @@ namespace
 		Schema->SetArrayField(TEXT("required"), Required);
 		return Schema;
 	}
+
+	// -----------------------------------------------------------------------
+	// auto_layout
+	// -----------------------------------------------------------------------
+	FAgentMcpToolResult HandleAutoLayout(const TSharedPtr<FJsonObject>& Args)
+	{
+		UBlueprint* Blueprint = nullptr;
+		UEdGraph* Graph = nullptr;
+		FString Error;
+		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		// Collect live nodes and build predecessor sets (any input pin linked from another node).
+		TArray<UEdGraphNode*> Nodes;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			if (Node) { Nodes.Add(Node); }
+		}
+		TMap<UEdGraphNode*, TSet<UEdGraphNode*>> Predecessors;
+		for (UEdGraphNode* Node : Nodes)
+		{
+			TSet<UEdGraphNode*>& Preds = Predecessors.FindOrAdd(Node);
+			for (const UEdGraphPin* Pin : Node->Pins)
+			{
+				if (!Pin || Pin->Direction != EGPD_Input) { continue; }
+				for (const UEdGraphPin* Linked : Pin->LinkedTo)
+				{
+					if (Linked && Linked->GetOwningNode())
+					{
+						Preds.Add(Linked->GetOwningNode());
+					}
+				}
+			}
+		}
+
+		// Layer by longest-path depth (Kahn-style; cycle leftovers go to a trailing layer).
+		TMap<UEdGraphNode*, int32> Depth;
+		TArray<UEdGraphNode*> Queue;
+		for (UEdGraphNode* Node : Nodes)
+		{
+			if (Predecessors[Node].Num() == 0)
+			{
+				Depth.Add(Node, 0);
+				Queue.Add(Node);
+			}
+		}
+		// Relaxation passes: depth(node) = max(depth(pred)) + 1. Bounded passes avoid cycle hangs.
+		for (int32 Pass = 0; Pass < Nodes.Num(); ++Pass)
+		{
+			bool bChanged = false;
+			for (UEdGraphNode* Node : Nodes)
+			{
+				int32 MaxPred = -1;
+				bool bAllKnown = Predecessors[Node].Num() > 0;
+				for (UEdGraphNode* Pred : Predecessors[Node])
+				{
+					const int32* PredDepth = Depth.Find(Pred);
+					if (!PredDepth) { bAllKnown = false; break; }
+					MaxPred = FMath::Max(MaxPred, *PredDepth);
+				}
+				if (bAllKnown)
+				{
+					const int32 NewDepth = MaxPred + 1;
+					int32* Existing = Depth.Find(Node);
+					if (!Existing || *Existing != NewDepth)
+					{
+						Depth.Add(Node, NewDepth);
+						bChanged = true;
+					}
+				}
+			}
+			if (!bChanged) { break; }
+		}
+		// Cycle leftovers: park after the deepest known layer, in stable order.
+		int32 MaxDepth = 0;
+		for (const TPair<UEdGraphNode*, int32>& Pair : Depth) { MaxDepth = FMath::Max(MaxDepth, Pair.Value); }
+		for (UEdGraphNode* Node : Nodes)
+		{
+			if (!Depth.Contains(Node)) { Depth.Add(Node, ++MaxDepth); }
+		}
+
+		// Assign positions: x = depth * 420; y = stable per-layer stacking * 280.
+		TMap<int32, int32> LayerCounts;
+		constexpr int32 ColumnWidth = 420;
+		constexpr int32 RowHeight = 280;
+
+		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AutoLayout", "MCP: Auto Layout"));
+		int32 LaidOut = 0;
+		for (UEdGraphNode* Node : Nodes)
+		{
+			const int32 NodeDepth = Depth[Node];
+			int32& RowIndex = LayerCounts.FindOrAdd(NodeDepth);
+			Node->Modify();
+			Node->NodePosX = NodeDepth * ColumnWidth;
+			Node->NodePosY = RowIndex * RowHeight;
+			++RowIndex;
+			++LaidOut;
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		TSet<int32> DistinctLayers;
+		for (const TPair<UEdGraphNode*, int32>& Pair : Depth) { DistinctLayers.Add(Pair.Value); }
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetNumberField(TEXT("laid_out"), LaidOut);
+		Result->SetNumberField(TEXT("layers"), DistinctLayers.Num());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterNodeGraphTools()
@@ -677,6 +786,15 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 		Def.InputSchema = MakeDeleteNodeSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleDeleteNode);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("auto_layout");
+		Def.Description = TEXT("Rearranges all nodes in a graph into left-to-right layers by connection depth. Destructive to manual layout (undoable via Ctrl+Z). Returns {laid_out, layers}. Args: blueprint_path (required), graph_name (optional, defaults to EventGraph).");
+		Def.InputSchema = MakeGraphArgsSchema();
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAutoLayout);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
