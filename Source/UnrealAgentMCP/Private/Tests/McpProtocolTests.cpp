@@ -145,7 +145,7 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpToolsEndToEndTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FMcpToolsEndToEndTest::RunTest(const FString& Parameters)
 {
-	// 模块 StartupModule 已注册工具到 live registry，这里走完整 tools/list -> tools/call 链路。
+	// StartupModule already registered tools into the live registry; this exercises the full tools/list -> tools/call path.
 	{
 		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(
 			AgentMcp::Protocol::HandleMessage(TEXT("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")));
