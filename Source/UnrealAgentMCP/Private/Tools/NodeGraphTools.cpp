@@ -3,6 +3,7 @@
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "EdGraph/EdGraph.h"
 #include "Engine/Blueprint.h"
 #include "Tools/McpToolUtils.h"
@@ -63,6 +64,9 @@ namespace
 		GraphProp->SetStringField(TEXT("description"), TEXT("Graph name; defaults to the event graph"));
 		Properties->SetObjectField(TEXT("graph_name"), GraphProp);
 		Schema->SetObjectField(TEXT("properties"), Properties);
+		TArray<TSharedPtr<FJsonValue>> Required;
+		Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+		Schema->SetArrayField(TEXT("required"), Required);
 		return Schema;
 	}
 }

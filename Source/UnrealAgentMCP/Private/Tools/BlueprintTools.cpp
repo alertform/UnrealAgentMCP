@@ -10,7 +10,6 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Logging/TokenizedMessage.h"
-#include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
 #include "UObject/UObjectGlobals.h"
@@ -53,7 +52,9 @@ namespace
 
 		// Delegate creation (and duplicate detection) entirely to the library.
 		// CreateBlueprintAssetWithParent checks FindObject<UPackage> internally and returns nullptr on collision.
-		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "CreateBlueprint", "MCP: Create Blueprint"));
+		// No FScopedTransaction here: asset creation does not go through the editor undo system
+		// (no Modify() records are written). Undo for created assets = delete_asset, which is P3
+		// Destructive-tier territory.
 		UBlueprint* Blueprint = UBlueprintEditorLibrary::CreateBlueprintAssetWithParent(AssetPath, ParentClass);
 		if (!Blueprint)
 		{
@@ -115,11 +116,16 @@ void AgentMcp::Tools::RegisterBlueprintTools()
 			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
 			TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
 			PathProp->SetStringField(TEXT("type"), TEXT("string"));
+			PathProp->SetStringField(TEXT("description"), TEXT("Absolute asset path for the new Blueprint, e.g. /Game/Dev/BP_New"));
 			Properties->SetObjectField(TEXT("asset_path"), PathProp);
 			TSharedRef<FJsonObject> ParentProp = MakeShared<FJsonObject>();
 			ParentProp->SetStringField(TEXT("type"), TEXT("string"));
+			ParentProp->SetStringField(TEXT("description"), TEXT("Parent class: short name (Actor) or full path (/Script/Engine.Actor). Default Actor."));
 			Properties->SetObjectField(TEXT("parent_class"), ParentProp);
 			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("asset_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleCreateBlueprint);
@@ -135,8 +141,12 @@ void AgentMcp::Tools::RegisterBlueprintTools()
 			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
 			TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
 			PathProp->SetStringField(TEXT("type"), TEXT("string"));
+			PathProp->SetStringField(TEXT("description"), TEXT("Path of the Blueprint to compile, e.g. /Game/Dev/BP_New"));
 			Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
 			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleCompileBlueprint);
