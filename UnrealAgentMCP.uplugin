@@ -1,0 +1,19 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "0.1.0",
+	"FriendlyName": "Unreal Agent MCP",
+	"Description": "Native MCP (Model Context Protocol) server inside the Unreal Editor. Lets AI agents like Claude Code drive the editor over streamable HTTP - no middleman process.",
+	"Category": "Editor",
+	"CreatedBy": "Ziton",
+	"CanContainContent": false,
+	"IsBetaVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "UnrealAgentMCP",
+			"Type": "Editor",
+			"LoadingPhase": "PostEngineInit"
+		}
+	]
+}
