@@ -2,6 +2,13 @@
 
 #include "Algo/Reverse.h"
 
+FAgentMcpLogCapture::FAgentMcpLogCapture()
+{
+	// Pre-size in the constructor so Serialize never allocates the ring storage under the lock.
+	Lines.SetNum(MaxLines);
+	Categories.SetNum(MaxLines);
+}
+
 FAgentMcpLogCapture& FAgentMcpLogCapture::Get()
 {
 	static FAgentMcpLogCapture Instance;
@@ -10,12 +17,10 @@ FAgentMcpLogCapture& FAgentMcpLogCapture::Get()
 
 void FAgentMcpLogCapture::Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category)
 {
+	// NOTE: never log from inside Serialize — BufferLock is a non-recursive FCriticalSection and a
+	// re-entrant log line would deadlock. This lock sits on the engine-wide logging hot path;
+	// TODO(P4): consider a lock-free ring or double-buffer if shader-compile bursts become measurable.
 	FScopeLock Lock(&BufferLock);
-	if (Lines.Num() < MaxLines)
-	{
-		Lines.SetNum(MaxLines);
-		Categories.SetNum(MaxLines);
-	}
 	Lines[Head] = FString::Printf(TEXT("[%s][%s] %s"), *Category.ToString(), ToString(Verbosity), V);
 	Categories[Head] = Category.ToString();
 	Head = (Head + 1) % MaxLines;

@@ -12,6 +12,8 @@ class FAgentMcpLogCapture final : public FOutputDevice
 public:
 	static constexpr int32 MaxLines = 2000;
 
+	FAgentMcpLogCapture();
+
 	static FAgentMcpLogCapture& Get();
 
 	virtual void Serialize(const TCHAR* V, ELogVerbosity::Type Verbosity, const FName& Category) override;
