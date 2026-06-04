@@ -18,6 +18,12 @@ void FAgentMcpToolRegistry::Register(FAgentMcpToolDef&& Def)
 		UE_LOG(LogAgentMcp, Warning, TEXT("Rejected invalid tool registration (empty name or unbound handler)"));
 		return;
 	}
+	if (Def.Name.Contains(TEXT(":")))
+	{
+		// ':' is reserved for synthetic audit-entry names (e.g. "console_command:started").
+		UE_LOG(LogAgentMcp, Warning, TEXT("Rejected tool registration '%s': ':' is reserved for audit namespacing"), *Def.Name);
+		return;
+	}
 	// Copy before MoveTemp: function-argument evaluation order is unspecified, Def.Name could be moved-from.
 	const FString Name = Def.Name;
 	Tools.Add(Name, MoveTemp(Def));

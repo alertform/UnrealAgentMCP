@@ -103,8 +103,11 @@ namespace
 		FScreenshotRequest::RequestScreenshot(Filename, /*bInShowUI=*/false, /*bAddFilenameSuffix=*/true);
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("queued"), true);
-		Result->SetStringField(TEXT("path"), FScreenshotRequest::GetFilename());
-		Result->SetStringField(TEXT("note"), TEXT("Screenshot is captured on the next rendered frame; with no viewport rendering (headless) the file never materializes."));
+		// Build the expected path locally: FScreenshotRequest::GetFilename() is a shared static that
+		// is only populated when a request is SERVICED on a rendered frame — reading it here would
+		// return the previous screenshot's path (or nothing), not this request's.
+		Result->SetStringField(TEXT("path"), FPaths::Combine(FPaths::ScreenshotDir(), Filename));
+		Result->SetStringField(TEXT("note"), TEXT("Captured on the next rendered frame; the engine appends a numeric suffix to the filename. With no viewport rendering (headless) the file never materializes."));
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
@@ -187,7 +190,7 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("console_command");
-		Def.Description = TEXT("DESTRUCTIVE tier: executes an arbitrary Unreal console command (e.g. stat fps, gc.CollectGarbageEveryFrame 1) including commands that can quit or modify editor state. Requires PermissionTier raised to Destructive in Project Settings > Plugins > Unreal Agent MCP. Returns {handled: bool, output: string}.");
+		Def.Description = TEXT("DESTRUCTIVE tier: executes an arbitrary Unreal console command (e.g. stat fps, gc.CollectGarbageEveryFrame 1) including commands that can quit or modify editor state. Requires PermissionTier raised to Destructive in Project Settings > Plugins > Unreal Agent MCP. Returns {handled: bool, output: string} - output captures only what the command writes to the provided device; many commands log to the engine log instead (use read_output_log to see that).");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
