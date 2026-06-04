@@ -51,6 +51,10 @@ void FMcpHttpServer::Stop()
 
 bool FMcpHttpServer::HandleRequest(const FHttpServerRequest& Request, const FHttpResultCallback& OnComplete)
 {
+	// Editor mutation APIs (FScopedTransaction, K2 node ops) require the game thread. The engine
+	// HTTPServer ticks listeners on the game thread (verified P1 review); assert the assumption.
+	check(IsInGameThread());
+
 	// TODO(P2): enforce Content-Type: application/json (415 otherwise). P1 is deliberately lenient —
 	// non-JSON bodies fall through to the protocol layer's -32700 parse error.
 	const FUTF8ToTCHAR Converter(reinterpret_cast<const ANSICHAR*>(Request.Body.GetData()), Request.Body.Num());

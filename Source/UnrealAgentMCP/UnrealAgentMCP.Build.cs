@@ -19,6 +19,8 @@ public class UnrealAgentMCP : ModuleRules
 		{
 			"HTTPServer",
 			"AssetRegistry",
+			"BlueprintGraph",
+			"UnrealEd",
 		});
 	}
 }
