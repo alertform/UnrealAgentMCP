@@ -7,14 +7,16 @@ No middleman process: the C++ plugin speaks MCP streamable-HTTP directly.
 Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Editor (this plugin)
 ```
 
-## Status: P2 (Blueprint node-graph editing) — closed loop verified
+## Status: P3a (safety core) — tier enforcement live
 
 - MCP methods: `initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call`
-- Tools (9): `engine_info`, `list_assets`, `read_graph`, `add_node`, `connect_pins`, `set_pin_default`, `delete_node`, `create_blueprint`, `compile_blueprint`
-- Closed loop: the agent edits the graph, compiles, reads structured errors back, fixes, recompiles. The P2 acceptance criterion (BeginPlay → PrintString, compiled clean) is locked in as an automation test (`UnrealAgentMCP.NodeGraph.P2AcceptanceClosedLoop`)
-- Honest agent contract: schema-rejected pin defaults are errors (never silent), broken/conversion-inserted links are reported, deleted nodes echo their identity, ghost events are reused (locale-safe) instead of duplicated
+- Tools (15): `engine_info`, `list_assets`, `read_graph`, `add_node`, `connect_pins`, `set_pin_default`, `delete_node`, `create_blueprint`, `compile_blueprint`, `undo`, `redo`, `read_output_log`, `take_screenshot`, `console_command`, `audit_tail`
+- **Three-tier permission ceiling** (ReadOnly / SafeWrite / Destructive) enforced at the single dispatch seam. Destructive tools (`console_command`) are rejected out of the box — raise the ceiling deliberately in Project Settings. Rejections carry a structured `rejected_by_tier` field so agents can branch on policy, not message text
+- **Full audit trail**: every call (and every rejection) lands in `Saved/AgentMCP/audit-YYYYMMDD.jsonl`; Destructive calls additionally write a pre-execute `:started` entry so even an editor-killing command is forensically attributable. Inspect from the agent via `audit_tail`
+- Closed loop: the agent edits the graph, compiles, reads structured errors back, fixes, recompiles (P2 acceptance locked in `UnrealAgentMCP.NodeGraph.P2AcceptanceClosedLoop`)
+- Honest agent contract: schema-rejected pin defaults are errors (never silent), broken/conversion-inserted links are reported, deleted nodes echo their identity, ghost events are reused (locale-safe), undo/redo descriptions warn about the editor-wide stack
 - Every mutation is transaction-wrapped: Ctrl+Z undoes agent edits step by step
-- Roadmap: actor/component/CDO tools + tier enforcement + audit log (P3), Enhanced Input + auto-layout + polish (P4)
+- Roadmap: actor/component/CDO/asset tool families (P3b), Enhanced Input + auto-layout + polish (P4)
 
 ## Setup
 
@@ -48,8 +50,9 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 ## Security model
 
 - Binds 127.0.0.1 only (engine HTTPServer default — verify with `netstat -an | findstr 17777`).
-- Tools carry a permission tier (ReadOnly / SafeWrite / Destructive); tier enforcement + audit log land in P3.
-- All write tools (from P2 on) run inside editor transactions — every agent edit is Ctrl+Z undoable.
+- Tier enforcement and the JSONL audit log are **live** (P3a): the ceiling check sits at the one dispatch seam every call passes through; the tier ordering is guarded by a `static_assert`.
+- All write tools run inside editor transactions — every agent edit is Ctrl+Z undoable. Validation failures cancel their transactions (no undo-history noise).
+- Audit entries record a truncated plaintext dump of tool args — don't pass secrets in tool arguments.
 
 ## Tests
 
@@ -57,7 +60,7 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAgentMCP" -TestExit="Automation Test Queue Empty" -NullRHI -unattended -nopause -nosplash -log
 ```
 
-18 tests: registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5).
+23 tests: registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5).
 
 ## Smoke test (curl)
 
