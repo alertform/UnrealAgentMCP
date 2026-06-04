@@ -149,6 +149,10 @@ bool FMcpToolsEndToEndTest::RunTest(const FString& Parameters)
 	{
 		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(
 			AgentMcp::Protocol::HandleMessage(TEXT("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")));
+		if (!TestTrue(TEXT("tools/list has result"), Obj.IsValid() && Obj->HasField(TEXT("result"))))
+		{
+			return true;
+		}
 		const TArray<TSharedPtr<FJsonValue>>& Tools = Obj->GetObjectField(TEXT("result"))->GetArrayField(TEXT("tools"));
 		bool bHasEngineInfo = false, bHasListAssets = false;
 		for (const TSharedPtr<FJsonValue>& Tool : Tools)
@@ -163,16 +167,27 @@ bool FMcpToolsEndToEndTest::RunTest(const FString& Parameters)
 	{
 		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
 			TEXT("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"engine_info\"}}")));
-		const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
-		TestFalse(TEXT("engine_info ok"), Result->GetBoolField(TEXT("isError")));
-		const FString Text = Result->GetArrayField(TEXT("content"))[0]->AsObject()->GetStringField(TEXT("text"));
-		TestTrue(TEXT("engine_info payload mentions 5.5"), Text.Contains(TEXT("5.5")));
+		if (TestTrue(TEXT("engine_info has result"), Obj.IsValid() && Obj->HasField(TEXT("result"))))
+		{
+			const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
+			TestFalse(TEXT("engine_info ok"), Result->GetBoolField(TEXT("isError")));
+			const TArray<TSharedPtr<FJsonValue>> Content = Result->GetArrayField(TEXT("content"));
+			if (TestTrue(TEXT("engine_info content not empty"), Content.Num() > 0))
+			{
+				const FString Text = Content[0]->AsObject()->GetStringField(TEXT("text"));
+				// Project is pinned to UE 5.5 (see CLAUDE.md); this version assertion is intentional.
+				TestTrue(TEXT("engine_info payload mentions 5.5"), Text.Contains(TEXT("5.5")));
+			}
+		}
 	}
 	{
 		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
 			TEXT("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"list_assets\",\"arguments\":{\"path\":\"/Game\",\"limit\":5}}}")));
-		const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
-		TestFalse(TEXT("list_assets ok"), Result->GetBoolField(TEXT("isError")));
+		if (TestTrue(TEXT("list_assets has result"), Obj.IsValid() && Obj->HasField(TEXT("result"))))
+		{
+			const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
+			TestFalse(TEXT("list_assets ok"), Result->GetBoolField(TEXT("isError")));
+		}
 	}
 	{
 		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(

@@ -7,8 +7,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Modules/ModuleManager.h"
-#include "Serialization/JsonSerializer.h"
-#include "Serialization/JsonWriter.h"
+#include "Tools/McpToolUtils.h"
 
 namespace
 {
@@ -38,6 +37,10 @@ namespace
 
 		FAssetRegistryModule& AssetRegistryModule = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
 		IAssetRegistry& AssetRegistry = AssetRegistryModule.Get();
+		// WaitForCompletion blocks the game thread until the background asset scan finishes —
+		// can take seconds on a cold editor start with large projects. Acceptable for P1 (single
+		// agent request at a time). TODO(P2): add bAllowStale or async completion once the HTTP
+		// transport is under concurrent load.
 		AssetRegistry.WaitForCompletion();
 
 		TArray<FAssetData> Assets;
@@ -60,10 +63,7 @@ namespace
 		Result->SetNumberField(TEXT("returned"), ReturnCount);
 		Result->SetArrayField(TEXT("assets"), AssetArray);
 
-		FString Out;
-		const TSharedRef<TJsonWriter<>> Writer = TJsonWriterFactory<>::Create(&Out);
-		FJsonSerializer::Serialize(Result, Writer);
-		return FAgentMcpToolResult::Success(Out);
+		return FAgentMcpToolResult::Success(AgentMcp::ToolUtils::SerializeObject(Result));
 	}
 }
 

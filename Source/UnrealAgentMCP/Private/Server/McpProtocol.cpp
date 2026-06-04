@@ -76,7 +76,7 @@ namespace
 
 		TSharedRef<FJsonObject> ServerInfo = MakeShared<FJsonObject>();
 		ServerInfo->SetStringField(TEXT("name"), TEXT("UnrealAgentMCP"));
-		ServerInfo->SetStringField(TEXT("version"), TEXT("0.1.0"));
+		ServerInfo->SetStringField(TEXT("version"), AgentMcp::PluginVersion);
 		Result->SetObjectField(TEXT("serverInfo"), ServerInfo);
 		return Result;
 	}

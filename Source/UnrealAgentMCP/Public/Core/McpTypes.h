@@ -4,6 +4,12 @@
 #include "Core/AgentMcpTier.h"
 #include "Dom/JsonObject.h"
 
+namespace AgentMcp
+{
+	/** Single source of truth for the plugin version reported by initialize and engine_info. */
+	inline constexpr const TCHAR* PluginVersion = TEXT("0.1.0");
+}
+
 /** Outcome of one tool invocation. Text carries the payload (JSON string or plain message). */
 struct FAgentMcpToolResult
 {
