@@ -21,7 +21,11 @@ namespace
 	constexpr int32 DefaultLimit = 200;
 	constexpr int32 MaxLimit = 1000;
 
-	/** Returns a loaded AssetRegistry, completing the background scan first. */
+	/**
+	 * Returns a loaded AssetRegistry, completing the background scan first. WaitForCompletion blocks
+	 * the game thread until the scan finishes — seconds on a cold editor start with large projects.
+	 * Acceptable for P3 (single agent request at a time); TODO(P4): async completion under load.
+	 */
 	IAssetRegistry& GetRegistry()
 	{
 		FAssetRegistryModule& Mod = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
@@ -121,6 +125,8 @@ namespace
 		}
 
 		TArray<FAssetData> Assets;
+		// Note: GetAssets fetches ALL matching records before name filtering / limit truncation —
+		// the limit is NOT an early-exit. Narrow 'path' or 'class_name' on production-scale projects.
 		AR.GetAssets(Filter, Assets);
 
 		// Apply optional name_contains filter (case-insensitive).
@@ -311,6 +317,15 @@ namespace
 				FString::Printf(TEXT("Package '%s' is not loaded. Load or create the asset first, e.g. via create_blueprint."), *PackageName));
 		}
 
+		// Map/level packages are out of scope: saving the open level through an "asset" tool is a
+		// surprising side effect, and levels (external actors, world partition) belong to the
+		// editor's own save flow.
+		if (Package->ContainsMap())
+		{
+			return FAgentMcpToolResult::Error(
+				FString::Printf(TEXT("'%s' is a map package; save levels through the editor's Save Level flow, not save_asset."), *PackageName));
+		}
+
 		// Mark dirty so SavePackages with bOnlyDirty=false still writes it reliably.
 		Package->MarkPackageDirty();
 
@@ -319,8 +334,9 @@ namespace
 		const bool bSaved = UEditorLoadingAndSavingUtils::SavePackages(PackagesToSave, /*bOnlyDirty*/ false);
 		if (!bSaved)
 		{
+			// No MarkPackageClean exists short of a reload — the package stays dirty in memory.
 			return FAgentMcpToolResult::Error(
-				FString::Printf(TEXT("SavePackages returned false for '%s'. The package may be read-only or locked by source control."), *PackageName));
+				FString::Printf(TEXT("SavePackages returned false for '%s'. The package may be read-only or locked by source control; it remains dirty in memory."), *PackageName));
 		}
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
@@ -362,7 +378,7 @@ void AgentMcp::Tools::RegisterAssetQueryTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("search_assets");
-		Def.Description = TEXT("Searches assets in the Asset Registry with optional filters. Returns {total, returned, assets:[{name, class, package_path}]}.");
+		Def.Description = TEXT("Searches assets in the Asset Registry with optional filters (name_contains substring, class_name, path - default /Game, limit 1-1000 default 100). Returns {total, returned, assets:[{name, class, package_path}]}.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
