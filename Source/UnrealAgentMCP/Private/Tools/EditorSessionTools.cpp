@@ -101,6 +101,12 @@ namespace
 			Filename = TEXT("AgentMcp");
 		}
 		FScreenshotRequest::RequestScreenshot(Filename, /*bInShowUI=*/false, /*bAddFilenameSuffix=*/true);
+		// Editor viewports redraw lazily (non-realtime viewports skip Draw when idle) and the request
+		// is only serviced inside a Draw — force one so the file actually materializes.
+		if (GEditor)
+		{
+			GEditor->RedrawAllViewports();
+		}
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("queued"), true);
 		// Build the expected path locally: FScreenshotRequest::GetFilename() is a shared static that
