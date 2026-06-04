@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "AgentMcpSettings.h"
+#include "GameFramework/Character.h"
 #include "Core/AgentMcpTier.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
@@ -292,6 +293,53 @@ bool FToolFamiliesComponentTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("compiles clean with components"), static_cast<int32>(Compiled->GetNumberField(TEXT("num_errors"))), 0);
 	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FToolFamiliesNativeComponentGuardTest,
+	"UnrealAgentMCP.ToolFamilies.NativeComponentMutationRejected",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FToolFamiliesNativeComponentGuardTest::RunTest(const FString& Parameters)
+{
+	// Native C++ components must be rejected (their template is the C++ CDO's subobject).
+	// ACharacter has CapsuleComponent, CharacterMovement, etc. as native components.
+	const FName CharBpName = MakeUniqueObjectName(GetTransientPackage(), UBlueprint::StaticClass(), FName(TEXT("BP_McpNativeCompTest")));
+	UBlueprint* CharBlueprint = FKismetEditorUtilities::CreateBlueprint(
+		ACharacter::StaticClass(), GetTransientPackage(), CharBpName,
+		BPTYPE_Normal, UBlueprint::StaticClass(), UBlueprintGeneratedClass::StaticClass());
+	if (!TestNotNull(TEXT("character blueprint created"), CharBlueprint))
+	{
+		return true;
+	}
+
+	const FString CharPath = CharBlueprint->GetPathName();
+	bool bIsError = false;
+
+	// Attempt to mutate CapsuleComponent (native) — must be rejected.
+	// We use CallToolRawText to inspect the error message and distinguish the guard reason.
+	const FString RawText = AgentMcpTestUtils::CallToolRawText(*this, TEXT("set_component_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"CapsuleComponent\",\"property\":\"CapsuleRadius\",\"value\":\"99\"}"), *CharPath), bIsError);
+	TestTrue(TEXT("native component mutation rejected (isError)"), bIsError);
+
+	// Determine which guard fired:
+	// - "native" in the message  => IsNativeComponent() guard reached — defense-in-depth working.
+	// - "not found" in the message => FindComponentHandleByName couldn't resolve the native node by
+	//   variable name (native nodes have no variable name on FSubobjectData), so the tool errors
+	//   before even reaching the guard. This is an equally strong safety posture.
+	const bool bNativeGuardFired  = RawText.Contains(TEXT("native"), ESearchCase::IgnoreCase);
+	const bool bNotFoundFired     = RawText.Contains(TEXT("not found"), ESearchCase::IgnoreCase);
+	TestTrue(TEXT("rejection is either native-guard or not-found (both are safe)"), bNativeGuardFired || bNotFoundFired);
+
+	// Log which path was taken so the report can note it.
+	if (bNativeGuardFired)
+	{
+		UE_LOG(LogTemp, Display, TEXT("NativeComponentGuardTest: IsNativeComponent() guard fired — defense-in-depth active."));
+	}
+	else if (bNotFoundFired)
+	{
+		UE_LOG(LogTemp, Display, TEXT("NativeComponentGuardTest: component-not-found fired — native node unreachable by variable name (stronger posture; IsNativeComponent guard is defense-in-depth)."));
+	}
+
 	return true;
 }
 

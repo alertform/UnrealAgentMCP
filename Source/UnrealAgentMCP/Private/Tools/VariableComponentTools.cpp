@@ -247,6 +247,8 @@ namespace
 		// ── optional desired name ─────────────────────────────────────────────
 		FString DesiredName;
 		Args->TryGetStringField(TEXT("component_name"), DesiredName);
+		// Trim whitespace; treat whitespace-only as not-provided.
+		DesiredName = DesiredName.TrimStartAndEnd();
 
 		// ── acquire subsystem ────────────────────────────────────────────────
 		USubobjectDataSubsystem* Subsystem = USubobjectDataSubsystem::Get();
@@ -267,9 +269,15 @@ namespace
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddComponent", "MCP: Add Component"));
 
 		FAddNewSubobjectParams Params;
+		// Handles[0] is the root ACTOR node for actor blueprints (AddNewSubobject reroutes to the
+		// real scene root internally via FindParentForNewSubobject). Non-actor blueprints would land
+		// in the FailReason error path below.
 		Params.ParentHandle     = Handles[0];
 		Params.NewClass         = ComponentClass;
 		Params.BlueprintContext = Blueprint;
+		// Avoid a redundant MarkBlueprintAsStructurallyModified inside AddNewSubobject — we call it
+		// explicitly below so that the transaction boundary is clear and consistent with other tools.
+		Params.bSkipMarkBlueprintModified = true;
 
 		FText FailReason;
 		FSubobjectDataHandle NewHandle = Subsystem->AddNewSubobject(Params, FailReason);
@@ -283,10 +291,18 @@ namespace
 		// ── optional rename ──────────────────────────────────────────────────
 		if (!DesiredName.IsEmpty())
 		{
+			FText RenameError;
+			if (!Subsystem->IsValidRename(NewHandle, FText::FromString(DesiredName), RenameError))
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Cannot name component '%s': %s"), *DesiredName, *RenameError.ToString()));
+			}
 			USubobjectDataSubsystem::RenameSubobjectMemberVariable(
 				Blueprint, NewHandle, FName(*DesiredName));
 		}
 
+		// Explicit structural mark (bSkipMarkBlueprintModified=true was set above).
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
 
 		// ── read back actual variable name ───────────────────────────────────
@@ -336,9 +352,21 @@ namespace
 			return FAgentMcpToolResult::Error(TEXT("USubobjectDataSubsystem unavailable."));
 		}
 
+		// Gather once, then scan the same array twice — avoids two K2_GatherSubobjectDataForBlueprint calls.
 		TArray<FSubobjectDataHandle> Handles;
-		FSubobjectDataHandle ChildHandle  = FindComponentHandleByName(Subsystem, Blueprint, FName(*ChildName),  Handles);
-		FSubobjectDataHandle ParentHandle = FindComponentHandleByName(Subsystem, Blueprint, FName(*ParentName), Handles);
+		Subsystem->K2_GatherSubobjectDataForBlueprint(Blueprint, Handles);
+		FSubobjectDataHandle ChildHandle  = FSubobjectDataHandle::InvalidHandle;
+		FSubobjectDataHandle ParentHandle = FSubobjectDataHandle::InvalidHandle;
+		for (const FSubobjectDataHandle& H : Handles)
+		{
+			FSubobjectData Data;
+			if (Subsystem->K2_FindSubobjectDataFromHandle(H, Data))
+			{
+				const FName VarName = Data.GetVariableName();
+				if (VarName == FName(*ChildName))  { ChildHandle  = H; }
+				if (VarName == FName(*ParentName)) { ParentHandle = H; }
+			}
+		}
 
 		if (!ChildHandle.IsValid())
 		{
@@ -425,6 +453,17 @@ namespace
 		{
 			return FAgentMcpToolResult::Error(TEXT("Failed to resolve subobject data from handle."));
 		}
+
+		// Native C++ components' "template" is the parent CDO's subobject — mutating it would leak
+		// across every Blueprint and instance of that C++ class. Only Blueprint-owned (SCS) and
+		// inherited-SCS components (which get per-BP override templates) are safely mutable here.
+		if (CompData.IsNativeComponent())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Component '%s' is a native C++ component; its template lives on the C++ CDO and cannot be safely mutated via MCP. Override such defaults in C++ or via the Details panel."),
+				*ComponentName));
+		}
+
 		UObject* Template = const_cast<UObject*>(CompData.GetObjectForBlueprint(Blueprint));
 		if (!Template)
 		{
@@ -436,7 +475,7 @@ namespace
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetComponentProperty", "MCP: Set Component Property"));
 		Template->Modify();
 
-		if (!PropertyBridge::SetPropertyFromString(Template, PropertyName, Value, Error))
+		if (!PropertyBridge::SetPropertyFromString(Template, PropertyName, Value, Error, /*bRejectTemplateDisabled=*/true))
 		{
 			Transaction.Cancel();
 			return FAgentMcpToolResult::Error(Error);
