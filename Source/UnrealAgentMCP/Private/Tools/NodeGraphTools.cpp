@@ -286,6 +286,11 @@ namespace
 		{
 			return FAgentMcpToolResult::Error(TEXT("connect_pins requires from_node_id, from_pin, to_node_id, to_pin."));
 		}
+		// Fix 4: self-connection early-out
+		if (FromNodeId == ToNodeId)
+		{
+			return FAgentMcpToolResult::Error(TEXT("from_node_id and to_node_id are the same node; self-connections are not permitted."));
+		}
 		UEdGraphNode* FromNode = NodeGraphUtils::FindNodeByGuid(Graph, FromNodeId, Error);
 		if (!FromNode) { return FAgentMcpToolResult::Error(Error); }
 		UEdGraphNode* ToNode = NodeGraphUtils::FindNodeByGuid(Graph, ToNodeId, Error);
@@ -294,7 +299,6 @@ namespace
 		// Non-null return from FindPin is usable; ignore fallback warning (schema CanCreateConnection is authoritative).
 		UEdGraphPin* FromPin = NodeGraphUtils::FindPin(FromNode, FromPinName, EGPD_Output, Error);
 		if (!FromPin) { return FAgentMcpToolResult::Error(Error); }
-		Error.Empty(); // clear any direction-mismatch warning — non-null means pin found
 		UEdGraphPin* ToPin = NodeGraphUtils::FindPin(ToNode, ToPinName, EGPD_Input, Error);
 		if (!ToPin) { return FAgentMcpToolResult::Error(Error); }
 
@@ -305,6 +309,26 @@ namespace
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Connection rejected: %s"), *Response.Message.ToString()));
 		}
+
+		// Fix 2: snapshot links that will be broken by BREAK_OTHERS responses before the transaction.
+		TArray<TSharedPtr<FJsonValue>> BrokenLinks;
+		const bool bBreaksA = Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_A || Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_AB;
+		const bool bBreaksB = Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_B || Response.Response == CONNECT_RESPONSE_BREAK_OTHERS_AB;
+		auto SnapshotLinks = [&BrokenLinks](const UEdGraphPin* Pin)
+		{
+			for (const UEdGraphPin* Linked : Pin->LinkedTo)
+			{
+				if (Linked && Linked->GetOwningNode())
+				{
+					TSharedRef<FJsonObject> Link = MakeShared<FJsonObject>();
+					Link->SetStringField(TEXT("node_id"), Linked->GetOwningNode()->NodeGuid.ToString());
+					Link->SetStringField(TEXT("pin_name"), Linked->PinName.ToString());
+					BrokenLinks.Add(MakeShared<FJsonValueObject>(Link));
+				}
+			}
+		};
+		if (bBreaksA) { SnapshotLinks(FromPin); }
+		if (bBreaksB) { SnapshotLinks(ToPin); }
 
 		// --- Mutation: open transaction only now ---
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "ConnectPins", "MCP: Connect Pins"));
@@ -319,6 +343,17 @@ namespace
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("connected"), true);
+		// Fix 1: report conversion-node insertion.
+		if (Response.Response == CONNECT_RESPONSE_MAKE_WITH_CONVERSION_NODE)
+		{
+			Result->SetStringField(TEXT("note"), TEXT("type mismatch resolved via an automatic conversion node inserted into the graph; call read_graph to see it"));
+		}
+		// Fix 2: report broken links (BREAK_OTHERS takes priority over conversion note since responses are mutually exclusive).
+		if (BrokenLinks.Num() > 0)
+		{
+			Result->SetArrayField(TEXT("broken_links"), BrokenLinks);
+			Result->SetStringField(TEXT("note"), TEXT("existing connections were broken to make room for this link (single-connection pin); see broken_links"));
+		}
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
@@ -358,7 +393,16 @@ namespace
 		// TrySetDefaultValue is a virtual on UEdGraphSchema (EdGraphSchema.h:899),
 		// overridden by UEdGraphSchema_K2 (EdGraphSchema_K2.h:540).
 		// Calling through the base-class pointer is correct — no cast needed.
+		// Fix 3: detect silent K2 rejection — TrySetDefaultValue has no return value; snapshot-and-compare.
+		const FString OldDefault = Pin->DefaultValue;
 		Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
+		if (Pin->DefaultValue == OldDefault && OldDefault != Value)
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Schema rejected default value '%s' for pin '%s' (type mismatch, exec pin, container pin, or by-ref pin)."),
+				*Value, *PinName));
+		}
 		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();

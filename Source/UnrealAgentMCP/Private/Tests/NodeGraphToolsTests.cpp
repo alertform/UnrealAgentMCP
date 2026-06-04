@@ -315,6 +315,12 @@ bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
 		}
 	}
 	TestTrue(TEXT("read_graph shows the new default"), bDefaultFound);
+
+	// Schema-rejected default (exec pin) must be a tool error, not a silent {"set":true}.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("set_pin_default"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\",\"pin_name\":\"execute\",\"value\":\"whatever\"}"), *Path, *PrintId), bIsError);
+	TestTrue(TEXT("default on exec pin is a tool error"), bIsError);
+
 	return true;
 }
 
