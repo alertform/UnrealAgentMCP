@@ -14,3 +14,18 @@ enum class EAgentMcpTier : uint8
 	/** Irreversible or disk-level operations (delete asset, arbitrary console command). */
 	Destructive = 2,
 };
+
+namespace AgentMcp
+{
+	/** Display name for tier comparisons in error messages and audit lines. */
+	inline const TCHAR* TierToString(EAgentMcpTier Tier)
+	{
+		switch (Tier)
+		{
+		case EAgentMcpTier::ReadOnly:    return TEXT("ReadOnly");
+		case EAgentMcpTier::SafeWrite:   return TEXT("SafeWrite");
+		case EAgentMcpTier::Destructive: return TEXT("Destructive");
+		default:                         return TEXT("Unknown");
+		}
+	}
+}

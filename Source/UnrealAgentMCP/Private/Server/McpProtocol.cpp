@@ -1,6 +1,8 @@
 #include "Server/McpProtocol.h"
 
+#include "AgentMcpSettings.h"
 #include "Core/AgentMcpAuditLog.h"
+#include "Core/AgentMcpTier.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
@@ -71,6 +73,23 @@ namespace
 		return SerializeObject(Response);
 	}
 
+	/** Builds a tools/call result response from an FAgentMcpToolResult — shared by the normal-execute
+	 *  path and the tier-rejection path so both produce byte-identical envelope shape. */
+	FString MakeToolResultResponse(const TSharedPtr<FJsonValue>& Id, const FAgentMcpToolResult& ToolResult)
+	{
+		TSharedRef<FJsonObject> ContentItem = MakeShared<FJsonObject>();
+		ContentItem->SetStringField(TEXT("type"), TEXT("text"));
+		ContentItem->SetStringField(TEXT("text"), ToolResult.Text);
+
+		TArray<TSharedPtr<FJsonValue>> Content;
+		Content.Add(MakeShared<FJsonValueObject>(ContentItem));
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetArrayField(TEXT("content"), Content);
+		Result->SetBoolField(TEXT("isError"), ToolResult.bIsError);
+		return MakeResultResponse(Id, Result);
+	}
+
 	TSharedRef<FJsonObject> HandleInitialize(const TSharedPtr<FJsonObject>& Params)
 	{
 		FString ClientVersion;
@@ -133,6 +152,25 @@ namespace
 		Params->TryGetObjectField(TEXT("arguments"), ArgsPtr);
 		const TSharedPtr<FJsonObject> Args = ArgsPtr ? *ArgsPtr : nullptr;
 
+		// Single enforcement seam: every tool call passes through here (P2 final review).
+		const UAgentMcpSettings* Settings = GetDefault<UAgentMcpSettings>();
+		if (Tool->Tier > Settings->PermissionTier)
+		{
+			FAgentMcpAuditEntry Rejection;
+			Rejection.Tool = ToolName;
+			Rejection.ArgsDigest = MakeArgsDigest(Args);
+			Rejection.bIsError = true;
+			Rejection.bRejectedByTier = true;
+			FAgentMcpAuditLog::Get().Append(Rejection);
+			UE_LOG(LogAgentMcp, Warning, TEXT("tools/call %s rejected: tier %s exceeds ceiling %s"),
+				*ToolName, AgentMcp::TierToString(Tool->Tier), AgentMcp::TierToString(Settings->PermissionTier));
+
+			const FAgentMcpToolResult Rejected = FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Tool '%s' requires permission tier '%s' but the server ceiling is '%s'. If intended, raise it under Project Settings > Plugins > Unreal Agent MCP."),
+				*ToolName, AgentMcp::TierToString(Tool->Tier), AgentMcp::TierToString(Settings->PermissionTier)));
+			return MakeToolResultResponse(Id, Rejected);
+		}
+
 		const double StartSeconds = FPlatformTime::Seconds();
 		const FAgentMcpToolResult ToolResult = Tool->Handler.Execute(Args);
 		const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;
@@ -146,17 +184,7 @@ namespace
 		Audit.DurationMs = ElapsedMs;
 		FAgentMcpAuditLog::Get().Append(Audit);
 
-		TSharedRef<FJsonObject> ContentItem = MakeShared<FJsonObject>();
-		ContentItem->SetStringField(TEXT("type"), TEXT("text"));
-		ContentItem->SetStringField(TEXT("text"), ToolResult.Text);
-
-		TArray<TSharedPtr<FJsonValue>> Content;
-		Content.Add(MakeShared<FJsonValueObject>(ContentItem));
-
-		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
-		Result->SetArrayField(TEXT("content"), Content);
-		Result->SetBoolField(TEXT("isError"), ToolResult.bIsError);
-		return MakeResultResponse(Id, Result);
+		return MakeToolResultResponse(Id, ToolResult);
 	}
 }
 
