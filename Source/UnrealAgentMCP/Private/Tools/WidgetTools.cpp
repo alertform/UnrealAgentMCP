@@ -1,5 +1,6 @@
 #include "Tools/WidgetTools.h"
 
+#include "BaseWidgetBlueprint.h"
 #include "Blueprint/IUserListEntry.h"
 #include "Blueprint/UserWidget.h"
 #include "Blueprint/WidgetTree.h"
@@ -9,7 +10,10 @@
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "EdGraph/EdGraph.h"
+#include "K2Node_ComponentBoundEvent.h"
 #include "Kismet2/BlueprintEditorUtils.h"
+#include "Kismet2/KismetEditorUtilities.h"
 #include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
@@ -384,6 +388,181 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
+	// ─────────────────────────────────────────────────────────────────────
+	// add_component_event handler
+	// ─────────────────────────────────────────────────────────────────────
+
+	FAgentMcpToolResult HandleAddComponentEvent(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args.IsValid())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing arguments."));
+		}
+
+		FString BlueprintPath;
+		if (!Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString ComponentName;
+		if (!Args->TryGetStringField(TEXT("component_name"), ComponentName) || ComponentName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'component_name'."));
+		}
+		FString EventName;
+		if (!Args->TryGetStringField(TEXT("event_name"), EventName) || EventName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'event_name'."));
+		}
+
+		// Optional position / graph args.
+		int32 PosX = 0, PosY = 0;
+		double Number = 0.0;
+		if (Args->TryGetNumberField(TEXT("pos_x"), Number)) { PosX = static_cast<int32>(Number); }
+		if (Args->TryGetNumberField(TEXT("pos_y"), Number)) { PosY = static_cast<int32>(Number); }
+		FString GraphName;
+		Args->TryGetStringField(TEXT("graph_name"), GraphName);
+
+		// ── 1. Resolve Blueprint ─────────────────────────────────────────────
+		FString Error;
+		UBlueprint* BP = NodeGraphUtils::ResolveBlueprint(BlueprintPath, Error);
+		if (!BP)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		// ── 2. Resolve owner class for the delegate property ─────────────────
+		//
+		// For WidgetBlueprints: the component is a widget in the WidgetTree.
+		// For Actor blueprints: the component is an SCS template.
+		//
+		// OwnerClass is the class that DECLARES the delegate property (e.g. UButton for OnClicked).
+		UClass* OwnerClass = nullptr;
+
+		if (UWidgetBlueprint* WBP = Cast<UWidgetBlueprint>(BP))
+		{
+			UWidgetTree* Tree = WBP->WidgetTree;
+			if (!Tree)
+			{
+				return FAgentMcpToolResult::Error(TEXT("WidgetBlueprint has no WidgetTree."));
+			}
+			UWidget* Widget = Tree->FindWidget(FName(*ComponentName));
+			if (!Widget)
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Widget '%s' not found in tree. Use list_widgets to enumerate available widgets."),
+					*ComponentName));
+			}
+			// Ensure the widget is exposed as a Blueprint variable so the skeleton class gets
+			// an FObjectProperty for it — required for the bound-event node's CompProp lookup.
+			if (!Widget->bIsVariable)
+			{
+				FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "MakeWidgetVariable", "MCP: Make Widget Variable"));
+				Widget->Modify();
+				Widget->bIsVariable = true;
+				FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+			}
+			OwnerClass = Widget->GetClass();
+		}
+		else
+		{
+			// Actor Blueprint: find the SCS component template by variable name.
+			// The template's class is what owns the delegate.
+			UClass* SkelClass = BP->SkeletonGeneratedClass;
+			if (!SkelClass)
+			{
+				return FAgentMcpToolResult::Error(TEXT("Blueprint has no SkeletonGeneratedClass."));
+			}
+			FObjectProperty* CompPropCheck = FindFProperty<FObjectProperty>(SkelClass, FName(*ComponentName));
+			if (!CompPropCheck)
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Component variable '%s' not found on blueprint class '%s'."),
+					*ComponentName, *BP->GetName()));
+			}
+			OwnerClass = CompPropCheck->PropertyClass;
+		}
+
+		if (!OwnerClass)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Could not determine owner class for component '%s'."), *ComponentName));
+		}
+
+		// ── 3. Find the delegate property on the owner class ─────────────────
+		FMulticastDelegateProperty* DelegateProp =
+			FindFProperty<FMulticastDelegateProperty>(OwnerClass, FName(*EventName));
+		if (!DelegateProp)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Class '%s' has no multicast delegate '%s'. Button examples: OnClicked, OnPressed, OnReleased, OnHovered."),
+				*OwnerClass->GetName(), *EventName));
+		}
+
+		// ── 4. Dedup: one bound event per (component, delegate) ──────────────
+		const UK2Node_ComponentBoundEvent* Existing =
+			FKismetEditorUtilities::FindBoundEventForComponent(
+				BP, FName(*EventName), FName(*ComponentName));
+		if (Existing)
+		{
+			// Return the existing node without modification.
+			TSharedRef<FJsonObject> Result = NodeGraphUtils::NodeToJson(Existing);
+			Result->SetStringField(TEXT("node_id"), Existing->NodeGuid.ToString());
+			Result->SetBoolField(TEXT("existing"), true);
+			return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+		}
+
+		// ── 5. Resolve FObjectProperty on SkeletonGeneratedClass for CompProp ─
+		UClass* SkelClass = BP->SkeletonGeneratedClass;
+		FObjectProperty* CompProp = SkelClass
+			? FindFProperty<FObjectProperty>(SkelClass, FName(*ComponentName))
+			: nullptr;
+
+		if (!CompProp)
+		{
+			// Trigger a skeleton compile (no GC) and retry once.
+			FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::SkipGarbageCollection);
+			SkelClass = BP->SkeletonGeneratedClass;
+			CompProp = SkelClass
+				? FindFProperty<FObjectProperty>(SkelClass, FName(*ComponentName))
+				: nullptr;
+		}
+
+		if (!CompProp)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("'%s' is not exposed as a Blueprint variable even after recompile. "
+					"Ensure the widget has bIsVariable=true (add_widget sets it by default)."),
+				*ComponentName));
+		}
+
+		// ── 6. Resolve target graph ───────────────────────────────────────────
+		UEdGraph* Graph = NodeGraphUtils::ResolveGraph(BP, GraphName, Error);
+		if (!Graph)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		// ── 7. Spawn the node ─────────────────────────────────────────────────
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddComponentEvent", "MCP: Add Component Event"));
+		Graph->Modify();
+
+		FGraphNodeCreator<UK2Node_ComponentBoundEvent> Creator(*Graph);
+		UK2Node_ComponentBoundEvent* Node = Creator.CreateNode(/*bSelectNewNode=*/false);
+		// InitializeComponentBoundEventParams MUST be called before Finalize (it calls GetBlueprint()).
+		Node->InitializeComponentBoundEventParams(CompProp, DelegateProp);
+		Node->NodePosX = PosX;
+		Node->NodePosY = PosY;
+		Creator.Finalize();
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(BP);
+
+		TSharedRef<FJsonObject> Result = NodeGraphUtils::NodeToJson(Node);
+		Result->SetStringField(TEXT("node_id"), Node->NodeGuid.ToString());
+		Result->SetBoolField(TEXT("existing"), false);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 } // anonymous namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -472,6 +651,66 @@ void AgentMcp::Tools::RegisterWidgetTools()
 		}
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleListWidgets);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// add_component_event
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("add_component_event");
+		Def.Description = TEXT(
+			"Creates a component-bound event node (e.g. a Button's OnClicked) in a Blueprint's event graph. "
+			"For WidgetBlueprints, component_name is the widget variable name (use list_widgets). "
+			"For Actor Blueprints, component_name is the SCS component variable name. "
+			"event_name is the multicast delegate property on the component class (e.g. OnClicked, OnPressed, OnReleased, OnHovered). "
+			"Deduplicates: if a bound event already exists for that (component, delegate) pair it is returned with existing:true. "
+			"Args: blueprint_path (req), component_name (req), event_name (req), graph_name (opt, default EventGraph), pos_x/pos_y (opt). "
+			"Returns {node_id, class, title, pins:[...], existing}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> BpPath = MakeShared<FJsonObject>();
+			BpPath->SetStringField(TEXT("type"), TEXT("string"));
+			BpPath->SetStringField(TEXT("description"), TEXT("Absolute asset path to the Blueprint, e.g. /Game/UI/WBP_MainMenu"));
+			Properties->SetObjectField(TEXT("blueprint_path"), BpPath);
+
+			TSharedRef<FJsonObject> CompName = MakeShared<FJsonObject>();
+			CompName->SetStringField(TEXT("type"), TEXT("string"));
+			CompName->SetStringField(TEXT("description"), TEXT("Variable name of the widget or component to bind to (use list_widgets for widget BPs, add_component name for actor BPs)."));
+			Properties->SetObjectField(TEXT("component_name"), CompName);
+
+			TSharedRef<FJsonObject> EvName = MakeShared<FJsonObject>();
+			EvName->SetStringField(TEXT("type"), TEXT("string"));
+			EvName->SetStringField(TEXT("description"), TEXT("Multicast delegate property name on the component class, e.g. OnClicked, OnPressed, OnReleased, OnHovered."));
+			Properties->SetObjectField(TEXT("event_name"), EvName);
+
+			TSharedRef<FJsonObject> GraphNameProp = MakeShared<FJsonObject>();
+			GraphNameProp->SetStringField(TEXT("type"), TEXT("string"));
+			GraphNameProp->SetStringField(TEXT("description"), TEXT("Graph name; defaults to the event graph."));
+			Properties->SetObjectField(TEXT("graph_name"), GraphNameProp);
+
+			TSharedRef<FJsonObject> PosX = MakeShared<FJsonObject>();
+			PosX->SetStringField(TEXT("type"), TEXT("integer"));
+			PosX->SetStringField(TEXT("description"), TEXT("Horizontal position of the new node in the graph (default 0)."));
+			Properties->SetObjectField(TEXT("pos_x"), PosX);
+
+			TSharedRef<FJsonObject> PosY = MakeShared<FJsonObject>();
+			PosY->SetStringField(TEXT("type"), TEXT("integer"));
+			PosY->SetStringField(TEXT("description"), TEXT("Vertical position of the new node in the graph (default 0)."));
+			Properties->SetObjectField(TEXT("pos_y"), PosY);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("component_name")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("event_name")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddComponentEvent);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 

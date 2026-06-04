@@ -388,4 +388,109 @@ bool FWidgetTreeAuthoringTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// FComponentEventTest
+// Verifies add_component_event: creates a Button OnClicked bound event node,
+// deduplicates on repeat call, rejects bad delegate name, rejects missing widget.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FComponentEventTest,
+	"UnrealAgentMCP.P5.ComponentEvent",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FComponentEventTest::RunTest(const FString& Parameters)
+{
+	// Step 1 — create a transient WBP and add a Button widget named JoinButton as root.
+	UWidgetBlueprint* WBP = AgentMcpTestUtils::MakeTransientWidgetBlueprint(TEXT("WBP_McpComponentEventTest"));
+	if (!TestNotNull(TEXT("transient WBP created"), WBP))
+	{
+		return true;
+	}
+	const FString Path = WBP->GetPathName();
+	bool bIsError = false;
+
+	const TSharedPtr<FJsonObject> AddBtn = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"Button\",\"widget_name\":\"JoinButton\",\"as_root\":true}"), *Path),
+		bIsError);
+	if (!TestFalse(TEXT("add_widget Button succeeds"), bIsError) ||
+		!TestNotNull(TEXT("add_widget payload"), AddBtn.Get()))
+	{
+		return true;
+	}
+
+	// Step 2 — add_component_event OnClicked -> expect node_id, class contains "ComponentBoundEvent",
+	//           exec output pin present, existing absent-or-false.
+	const TSharedPtr<FJsonObject> EventResult = AgentMcpTestUtils::CallTool(*this, TEXT("add_component_event"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"JoinButton\",\"event_name\":\"OnClicked\"}"), *Path),
+		bIsError);
+	FString FirstNodeId;
+	if (!TestFalse(TEXT("add_component_event OnClicked succeeds"), bIsError) ||
+		!TestNotNull(TEXT("add_component_event payload"), EventResult.Get()))
+	{
+		return true;
+	}
+	FirstNodeId = EventResult->GetStringField(TEXT("node_id"));
+	TestFalse(TEXT("node_id not empty"), FirstNodeId.IsEmpty());
+	TestTrue(TEXT("class contains ComponentBoundEvent"),
+		EventResult->GetStringField(TEXT("class")).Contains(TEXT("ComponentBoundEvent"), ESearchCase::IgnoreCase));
+	TestFalse(TEXT("existing is false on first call"), EventResult->GetBoolField(TEXT("existing")));
+
+	// Verify at least one exec output pin exists.
+	// PinToJson serializes direction as "out" (not "output") — see NodeGraphUtils.cpp PinToJson.
+	bool bHasExecOut = false;
+	for (const TSharedPtr<FJsonValue>& PinVal : EventResult->GetArrayField(TEXT("pins")))
+	{
+		const TSharedPtr<FJsonObject> PinObj = PinVal->AsObject();
+		if (PinObj.IsValid())
+		{
+			const FString Dir = PinObj->GetStringField(TEXT("direction"));
+			const FString Type = PinObj->GetStringField(TEXT("type"));
+			if (Dir == TEXT("out") && Type.Contains(TEXT("exec"), ESearchCase::IgnoreCase))
+			{
+				bHasExecOut = true;
+			}
+		}
+	}
+	TestTrue(TEXT("bound event has exec output pin"), bHasExecOut);
+
+	// Step 3 — same call again -> existing:true AND same node_id.
+	const TSharedPtr<FJsonObject> DupResult = AgentMcpTestUtils::CallTool(*this, TEXT("add_component_event"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"JoinButton\",\"event_name\":\"OnClicked\"}"), *Path),
+		bIsError);
+	if (TestFalse(TEXT("add_component_event dedup succeeds"), bIsError) &&
+		TestNotNull(TEXT("dedup payload"), DupResult.Get()))
+	{
+		TestTrue(TEXT("dedup returns existing:true"), DupResult->GetBoolField(TEXT("existing")));
+		TestEqual(TEXT("dedup returns same node_id"), DupResult->GetStringField(TEXT("node_id")), FirstNodeId);
+	}
+
+	// Step 4 — bad delegate name -> error mentioning the widget class name or the delegate name.
+	const FString BadEventErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_component_event"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"JoinButton\",\"event_name\":\"OnNoSuchEvent\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("bad delegate name is error"), bIsError);
+	TestTrue(TEXT("bad delegate error mentions delegate or class"),
+		BadEventErr.Contains(TEXT("OnNoSuchEvent"), ESearchCase::IgnoreCase) ||
+		BadEventErr.Contains(TEXT("Button"), ESearchCase::IgnoreCase));
+
+	// Step 5 — missing widget -> error containing "list_widgets".
+	const FString MissingWidgetErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_component_event"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"NoSuchWidget\",\"event_name\":\"OnClicked\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("missing widget is error"), bIsError);
+	TestTrue(TEXT("missing widget error contains list_widgets"),
+		MissingWidgetErr.Contains(TEXT("list_widgets"), ESearchCase::IgnoreCase));
+
+	// Step 6 — compile_blueprint -> 0 errors.
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("compile_blueprint succeeds"), bIsError);
+	if (TestNotNull(TEXT("compile payload"), Compiled.Get()))
+	{
+		TestEqual(TEXT("compile status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
+		TestEqual(TEXT("compile num_errors 0"), (int32)Compiled->GetNumberField(TEXT("num_errors")), 0);
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
