@@ -246,4 +246,53 @@ bool FToolFamiliesVariableTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FToolFamiliesComponentTest,
+	"UnrealAgentMCP.ToolFamilies.ComponentAddAttachSet",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FToolFamiliesComponentTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpCompTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	// add two components, attach one under the other, set a property on the child.
+	const TSharedPtr<FJsonObject> Added1 = AgentMcpTestUtils::CallTool(*this, TEXT("add_component"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_class\":\"SceneComponent\",\"component_name\":\"McpRoot\"}"), *Path), bIsError);
+	TestFalse(TEXT("add SceneComponent ok"), bIsError);
+	const TSharedPtr<FJsonObject> Added2 = AgentMcpTestUtils::CallTool(*this, TEXT("add_component"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_class\":\"PointLightComponent\",\"component_name\":\"McpLight\"}"), *Path), bIsError);
+	TestFalse(TEXT("add PointLightComponent ok"), bIsError);
+	FString LightName = Added2.IsValid() ? Added2->GetStringField(TEXT("component_name")) : TEXT("McpLight");
+	FString RootName = Added1.IsValid() ? Added1->GetStringField(TEXT("component_name")) : TEXT("McpRoot");
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("attach_component"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"child_name\":\"%s\",\"parent_name\":\"%s\"}"), *Path, *LightName, *RootName), bIsError);
+	TestFalse(TEXT("attach ok"), bIsError);
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_component_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"%s\",\"property\":\"Intensity\",\"value\":\"1234.0\"}"), *Path, *LightName), bIsError);
+	TestFalse(TEXT("set Intensity ok"), bIsError);
+
+	// unknown component class / unknown component name -> tool errors.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_component"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_class\":\"NoSuchComponentXyz\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown component class is a tool error"), bIsError);
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_component_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"component_name\":\"NoSuchComp\",\"property\":\"Intensity\",\"value\":\"1\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown component name is a tool error"), bIsError);
+
+	// compiles clean with the new component tree.
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	if (Compiled.IsValid())
+	{
+		TestEqual(TEXT("compiles clean with components"), static_cast<int32>(Compiled->GetNumberField(TEXT("num_errors"))), 0);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

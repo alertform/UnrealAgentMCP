@@ -9,8 +9,11 @@
 #include "Engine/Blueprint.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "ScopedTransaction.h"
+#include "SubobjectDataSubsystem.h"
+#include "SubobjectData.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
+#include "Tools/PropertyBridge.h"
 
 namespace
 {
@@ -182,6 +185,275 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
+	// ── Subobject helpers ────────────────────────────────────────────────────
+
+	/**
+	 * Gathers all FSubobjectDataHandle for the Blueprint and finds the one
+	 * whose variable name (FSubobjectData::GetVariableName) matches ComponentName.
+	 * Returns an invalid handle if not found.
+	 */
+	FSubobjectDataHandle FindComponentHandleByName(
+		USubobjectDataSubsystem* Subsystem,
+		UBlueprint* Blueprint,
+		const FName& ComponentName,
+		TArray<FSubobjectDataHandle>& OutHandles)
+	{
+		Subsystem->K2_GatherSubobjectDataForBlueprint(Blueprint, OutHandles);
+		for (const FSubobjectDataHandle& H : OutHandles)
+		{
+			FSubobjectData Data;
+			if (Subsystem->K2_FindSubobjectDataFromHandle(H, Data))
+			{
+				if (Data.GetVariableName() == ComponentName)
+				{
+					return H;
+				}
+			}
+		}
+		return FSubobjectDataHandle::InvalidHandle;
+	}
+
+	// ── add_component ────────────────────────────────────────────────────────
+
+	FAgentMcpToolResult HandleAddComponent(const TSharedPtr<FJsonObject>& Args)
+	{
+		// ── validate required args ────────────────────────────────────────────
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString ComponentClassName;
+		if (!Args->TryGetStringField(TEXT("component_class"), ComponentClassName) || ComponentClassName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'component_class'."));
+		}
+
+		FString Error;
+		UBlueprint* Blueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, Error);
+		if (!Blueprint)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		// ── resolve component class ───────────────────────────────────────────
+		UClass* ComponentClass = UClass::TryFindTypeSlow<UClass>(ComponentClassName);
+		if (!ComponentClass || !ComponentClass->IsChildOf(UActorComponent::StaticClass()))
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Component class '%s' not found or is not a UActorComponent subclass."), *ComponentClassName));
+		}
+
+		// ── optional desired name ─────────────────────────────────────────────
+		FString DesiredName;
+		Args->TryGetStringField(TEXT("component_name"), DesiredName);
+
+		// ── acquire subsystem ────────────────────────────────────────────────
+		USubobjectDataSubsystem* Subsystem = USubobjectDataSubsystem::Get();
+		if (!Subsystem)
+		{
+			return FAgentMcpToolResult::Error(TEXT("USubobjectDataSubsystem unavailable."));
+		}
+
+		// ── gather existing handles to get root ──────────────────────────────
+		TArray<FSubobjectDataHandle> Handles;
+		Subsystem->K2_GatherSubobjectDataForBlueprint(Blueprint, Handles);
+		if (Handles.Num() == 0)
+		{
+			return FAgentMcpToolResult::Error(TEXT("Blueprint has no subobject root — cannot add component."));
+		}
+
+		// ── transaction + AddNewSubobject ────────────────────────────────────
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddComponent", "MCP: Add Component"));
+
+		FAddNewSubobjectParams Params;
+		Params.ParentHandle     = Handles[0];
+		Params.NewClass         = ComponentClass;
+		Params.BlueprintContext = Blueprint;
+
+		FText FailReason;
+		FSubobjectDataHandle NewHandle = Subsystem->AddNewSubobject(Params, FailReason);
+		if (!NewHandle.IsValid())
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("AddNewSubobject failed: %s"), *FailReason.ToString()));
+		}
+
+		// ── optional rename ──────────────────────────────────────────────────
+		if (!DesiredName.IsEmpty())
+		{
+			USubobjectDataSubsystem::RenameSubobjectMemberVariable(
+				Blueprint, NewHandle, FName(*DesiredName));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		// ── read back actual variable name ───────────────────────────────────
+		FSubobjectData NewData;
+		FString ActualName = DesiredName;
+		if (Subsystem->K2_FindSubobjectDataFromHandle(NewHandle, NewData))
+		{
+			ActualName = NewData.GetVariableName().ToString();
+		}
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("added"), true);
+		Result->SetStringField(TEXT("component_name"), ActualName);
+		Result->SetStringField(TEXT("handle_note"), TEXT("component_name is the Blueprint variable name; use it in attach_component and set_component_property"));
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	// ── attach_component ─────────────────────────────────────────────────────
+
+	FAgentMcpToolResult HandleAttachComponent(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString ChildName, ParentName;
+		if (!Args->TryGetStringField(TEXT("child_name"), ChildName) || ChildName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'child_name'."));
+		}
+		if (!Args->TryGetStringField(TEXT("parent_name"), ParentName) || ParentName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'parent_name'."));
+		}
+
+		FString Error;
+		UBlueprint* Blueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, Error);
+		if (!Blueprint)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		USubobjectDataSubsystem* Subsystem = USubobjectDataSubsystem::Get();
+		if (!Subsystem)
+		{
+			return FAgentMcpToolResult::Error(TEXT("USubobjectDataSubsystem unavailable."));
+		}
+
+		TArray<FSubobjectDataHandle> Handles;
+		FSubobjectDataHandle ChildHandle  = FindComponentHandleByName(Subsystem, Blueprint, FName(*ChildName),  Handles);
+		FSubobjectDataHandle ParentHandle = FindComponentHandleByName(Subsystem, Blueprint, FName(*ParentName), Handles);
+
+		if (!ChildHandle.IsValid())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Component '%s' not found in Blueprint '%s'. Use the component_name returned by add_component."),
+				*ChildName, *Blueprint->GetName()));
+		}
+		if (!ParentHandle.IsValid())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Parent component '%s' not found in Blueprint '%s'."),
+				*ParentName, *Blueprint->GetName()));
+		}
+
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AttachComponent", "MCP: Attach Component"));
+
+		if (!Subsystem->AttachSubobject(ParentHandle, ChildHandle))
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("AttachSubobject failed for child '%s' -> parent '%s'."), *ChildName, *ParentName));
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("attached"), true);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	// ── set_component_property ───────────────────────────────────────────────
+
+	FAgentMcpToolResult HandleSetComponentProperty(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString ComponentName;
+		if (!Args->TryGetStringField(TEXT("component_name"), ComponentName) || ComponentName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'component_name'."));
+		}
+		FString PropertyName, Value;
+		if (!Args->TryGetStringField(TEXT("property"), PropertyName) || PropertyName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'property'."));
+		}
+		if (!Args->TryGetStringField(TEXT("value"), Value))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'value'."));
+		}
+
+		FString Error;
+		UBlueprint* Blueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, Error);
+		if (!Blueprint)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		USubobjectDataSubsystem* Subsystem = USubobjectDataSubsystem::Get();
+		if (!Subsystem)
+		{
+			return FAgentMcpToolResult::Error(TEXT("USubobjectDataSubsystem unavailable."));
+		}
+
+		TArray<FSubobjectDataHandle> Handles;
+		FSubobjectDataHandle CompHandle = FindComponentHandleByName(
+			Subsystem, Blueprint, FName(*ComponentName), Handles);
+		if (!CompHandle.IsValid())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Component '%s' not found in Blueprint '%s'. Use the component_name returned by add_component."),
+				*ComponentName, *Blueprint->GetName()));
+		}
+
+		// GetObjectForBlueprint returns the component TEMPLATE (archetype) for BP-owned components,
+		// so mutations are inherited by all instances — exactly what we need for a Blueprint setter.
+		// GetMutableObjectForBlueprint is private (subsystem-friend only), so we const_cast the
+		// public const accessor; this matches how Blueprint editor panels mutate component templates.
+		FSubobjectData CompData;
+		if (!Subsystem->K2_FindSubobjectDataFromHandle(CompHandle, CompData))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Failed to resolve subobject data from handle."));
+		}
+		UObject* Template = const_cast<UObject*>(CompData.GetObjectForBlueprint(Blueprint));
+		if (!Template)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("No component template found for '%s' in Blueprint context — component may be inherited (read-only)."),
+				*ComponentName));
+		}
+
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetComponentProperty", "MCP: Set Component Property"));
+		Template->Modify();
+
+		if (!PropertyBridge::SetPropertyFromString(Template, PropertyName, Value, Error))
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		FString ReadBack, Type;
+		PropertyBridge::GetPropertyAsString(Template, PropertyName, ReadBack, Type, Error);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("set"), true);
+		Result->SetStringField(TEXT("property"), PropertyName);
+		Result->SetStringField(TEXT("value"), ReadBack);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 } // namespace
 
 void AgentMcp::Tools::RegisterVariableComponentTools()
@@ -268,6 +540,125 @@ void AgentMcp::Tools::RegisterVariableComponentTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetVariableFlags);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// ── add_component ─────────────────────────────────────────────────────────
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("add_component");
+		Def.Description = TEXT("Adds a new component of the given class to a Blueprint via USubobjectDataSubsystem. component_name sets the Blueprint variable name (if omitted the engine generates one). Returns {added:true, component_name, handle_note}. Use the returned component_name in attach_component and set_component_property.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetStringField(TEXT("description"), TEXT("Absolute package path to the Blueprint asset."));
+			Props->SetObjectField(TEXT("blueprint_path"), BpProp);
+
+			TSharedRef<FJsonObject> ClsProp = MakeShared<FJsonObject>();
+			ClsProp->SetStringField(TEXT("type"), TEXT("string"));
+			ClsProp->SetStringField(TEXT("description"), TEXT("Short class name of the component to add, e.g. SceneComponent, StaticMeshComponent, PointLightComponent. Must be a UActorComponent subclass."));
+			Props->SetObjectField(TEXT("component_class"), ClsProp);
+
+			TSharedRef<FJsonObject> NameProp = MakeShared<FJsonObject>();
+			NameProp->SetStringField(TEXT("type"), TEXT("string"));
+			NameProp->SetStringField(TEXT("description"), TEXT("Optional desired Blueprint variable name for the new component. If omitted the engine auto-generates one."));
+			Props->SetObjectField(TEXT("component_name"), NameProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("component_class")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddComponent);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// ── attach_component ──────────────────────────────────────────────────────
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("attach_component");
+		Def.Description = TEXT("Attaches child_name component under parent_name component in the Blueprint's component hierarchy. Both names are Blueprint variable names as returned by add_component. Wrapped in an undo transaction. Returns {attached:true}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetStringField(TEXT("description"), TEXT("Absolute package path to the Blueprint asset."));
+			Props->SetObjectField(TEXT("blueprint_path"), BpProp);
+
+			TSharedRef<FJsonObject> ChildProp = MakeShared<FJsonObject>();
+			ChildProp->SetStringField(TEXT("type"), TEXT("string"));
+			ChildProp->SetStringField(TEXT("description"), TEXT("Blueprint variable name of the component to move (the child). From add_component's component_name."));
+			Props->SetObjectField(TEXT("child_name"), ChildProp);
+
+			TSharedRef<FJsonObject> ParentProp = MakeShared<FJsonObject>();
+			ParentProp->SetStringField(TEXT("type"), TEXT("string"));
+			ParentProp->SetStringField(TEXT("description"), TEXT("Blueprint variable name of the component to attach under (the new parent). From add_component's component_name."));
+			Props->SetObjectField(TEXT("parent_name"), ParentProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("child_name")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("parent_name")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAttachComponent);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// ── set_component_property ────────────────────────────────────────────────
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("set_component_property");
+		Def.Description = TEXT("Sets a property on a Blueprint component's template (archetype) so all instances inherit the value. component_name is the Blueprint variable name from add_component. value uses UE ImportText syntax. Only EditAnywhere/EditDefaultsOnly properties are writable. Wrapped in an undo transaction. Returns {set:true, property, value(readback)}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> BpProp = MakeShared<FJsonObject>();
+			BpProp->SetStringField(TEXT("type"), TEXT("string"));
+			BpProp->SetStringField(TEXT("description"), TEXT("Absolute package path to the Blueprint asset."));
+			Props->SetObjectField(TEXT("blueprint_path"), BpProp);
+
+			TSharedRef<FJsonObject> CompProp = MakeShared<FJsonObject>();
+			CompProp->SetStringField(TEXT("type"), TEXT("string"));
+			CompProp->SetStringField(TEXT("description"), TEXT("Blueprint variable name of the component whose template property should be set. From add_component's component_name."));
+			Props->SetObjectField(TEXT("component_name"), CompProp);
+
+			TSharedRef<FJsonObject> PropProp = MakeShared<FJsonObject>();
+			PropProp->SetStringField(TEXT("type"), TEXT("string"));
+			PropProp->SetStringField(TEXT("description"), TEXT("C++ property name on the component class, e.g. Intensity, CastShadows, RelativeLocation."));
+			Props->SetObjectField(TEXT("property"), PropProp);
+
+			TSharedRef<FJsonObject> ValProp = MakeShared<FJsonObject>();
+			ValProp->SetStringField(TEXT("type"), TEXT("string"));
+			ValProp->SetStringField(TEXT("description"), TEXT("New value in UE ImportText syntax: True/False (bool), 42 (int), 1234.0 (float), (X=0,Y=0,Z=0) (vector). Only EditAnywhere/EditDefaultsOnly properties accepted."));
+			Props->SetObjectField(TEXT("value"), ValProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("component_name")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("property")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("value")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetComponentProperty);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

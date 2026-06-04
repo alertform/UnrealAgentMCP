@@ -22,6 +22,7 @@ public class UnrealAgentMCP : ModuleRules
 			"BlueprintGraph",
 			"UnrealEd",
 			"BlueprintEditorLibrary",
+			"SubobjectDataInterface",
 		});
 	}
 }
