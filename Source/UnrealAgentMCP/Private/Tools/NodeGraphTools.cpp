@@ -265,6 +265,114 @@ namespace
 		return FAgentMcpToolResult::Error(FString::Printf(TEXT("Unknown node_type '%s'. Supported: event, call_function, branch, sequence, variable_get, variable_set, self."), *NodeType));
 	}
 
+	// -----------------------------------------------------------------------
+	// connect_pins
+	// -----------------------------------------------------------------------
+	FAgentMcpToolResult HandleConnectPins(const TSharedPtr<FJsonObject>& Args)
+	{
+		// --- Validate all args before opening a transaction ---
+		UBlueprint* Blueprint = nullptr;
+		UEdGraph* Graph = nullptr;
+		FString Error;
+		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		FString FromNodeId, FromPinName, ToNodeId, ToPinName;
+		if (!Args->TryGetStringField(TEXT("from_node_id"), FromNodeId) ||
+			!Args->TryGetStringField(TEXT("from_pin"), FromPinName) ||
+			!Args->TryGetStringField(TEXT("to_node_id"), ToNodeId) ||
+			!Args->TryGetStringField(TEXT("to_pin"), ToPinName))
+		{
+			return FAgentMcpToolResult::Error(TEXT("connect_pins requires from_node_id, from_pin, to_node_id, to_pin."));
+		}
+		UEdGraphNode* FromNode = NodeGraphUtils::FindNodeByGuid(Graph, FromNodeId, Error);
+		if (!FromNode) { return FAgentMcpToolResult::Error(Error); }
+		UEdGraphNode* ToNode = NodeGraphUtils::FindNodeByGuid(Graph, ToNodeId, Error);
+		if (!ToNode) { return FAgentMcpToolResult::Error(Error); }
+		// from_pin: prefer Output; to_pin: prefer Input.
+		// Non-null return from FindPin is usable; ignore fallback warning (schema CanCreateConnection is authoritative).
+		UEdGraphPin* FromPin = NodeGraphUtils::FindPin(FromNode, FromPinName, EGPD_Output, Error);
+		if (!FromPin) { return FAgentMcpToolResult::Error(Error); }
+		Error.Empty(); // clear any direction-mismatch warning — non-null means pin found
+		UEdGraphPin* ToPin = NodeGraphUtils::FindPin(ToNode, ToPinName, EGPD_Input, Error);
+		if (!ToPin) { return FAgentMcpToolResult::Error(Error); }
+
+		// CanCreateConnection is read-only — check before transaction.
+		const UEdGraphSchema* Schema = Graph->GetSchema();
+		const FPinConnectionResponse Response = Schema->CanCreateConnection(FromPin, ToPin);
+		if (Response.Response == CONNECT_RESPONSE_DISALLOW)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Connection rejected: %s"), *Response.Message.ToString()));
+		}
+
+		// --- Mutation: open transaction only now ---
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "ConnectPins", "MCP: Connect Pins"));
+		FromNode->Modify();
+		ToNode->Modify();
+		if (!Schema->TryCreateConnection(FromPin, ToPin))
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(TEXT("TryCreateConnection failed after CanCreateConnection allowed it (schema conversion path?). Re-read the graph."));
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("connected"), true);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	// -----------------------------------------------------------------------
+	// set_pin_default
+	// -----------------------------------------------------------------------
+	FAgentMcpToolResult HandleSetPinDefault(const TSharedPtr<FJsonObject>& Args)
+	{
+		// --- Validate all args before opening a transaction ---
+		UBlueprint* Blueprint = nullptr;
+		UEdGraph* Graph = nullptr;
+		FString Error;
+		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		FString NodeId, PinName, Value;
+		if (!Args->TryGetStringField(TEXT("node_id"), NodeId) ||
+			!Args->TryGetStringField(TEXT("pin_name"), PinName) ||
+			!Args->TryGetStringField(TEXT("value"), Value))
+		{
+			return FAgentMcpToolResult::Error(TEXT("set_pin_default requires node_id, pin_name and value (string)."));
+		}
+		UEdGraphNode* Node = NodeGraphUtils::FindNodeByGuid(Graph, NodeId, Error);
+		if (!Node) { return FAgentMcpToolResult::Error(Error); }
+		// Prefer Input pins for defaults; non-null is usable even if FindPin set a fallback warning.
+		UEdGraphPin* Pin = NodeGraphUtils::FindPin(Node, PinName, EGPD_Input, Error);
+		if (!Pin) { return FAgentMcpToolResult::Error(Error); }
+		if (Pin->Direction != EGPD_Input)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Pin '%s' is an output pin; defaults only apply to inputs."), *PinName));
+		}
+
+		// --- Mutation ---
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetPinDefault", "MCP: Set Pin Default"));
+		Node->Modify();
+		// TrySetDefaultValue is a virtual on UEdGraphSchema (EdGraphSchema.h:899),
+		// overridden by UEdGraphSchema_K2 (EdGraphSchema_K2.h:540).
+		// Calling through the base-class pointer is correct — no cast needed.
+		Graph->GetSchema()->TrySetDefaultValue(*Pin, Value);
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("set"), true);
+		Result->SetStringField(TEXT("pin"), PinName);
+		Result->SetStringField(TEXT("value"), Pin->DefaultValue);
+		// Advisory: default is ignored by the compiler while the pin has live connections.
+		if (Pin->LinkedTo.Num() > 0)
+		{
+			Result->SetStringField(TEXT("note"), TEXT("pin has live connections; default is ignored while connected"));
+		}
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 	TSharedRef<FJsonObject> MakeGraphArgsSchema()
 	{
 		TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
@@ -345,6 +453,75 @@ namespace
 		Schema->SetArrayField(TEXT("required"), Required);
 		return Schema;
 	}
+
+	TSharedRef<FJsonObject> MakeConnectPinsSchema()
+	{
+		TSharedRef<FJsonObject> Schema = MakeGraphArgsSchema();
+		TSharedRef<FJsonObject> Props = Schema->GetObjectField(TEXT("properties")).ToSharedRef();
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("NodeGuid of the source node (from read_graph or add_node node_id)"));
+			Props->SetObjectField(TEXT("from_node_id"), P);
+		}
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("Pin name on the source node; Output pins are preferred when names collide"));
+			Props->SetObjectField(TEXT("from_pin"), P);
+		}
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("NodeGuid of the destination node"));
+			Props->SetObjectField(TEXT("to_node_id"), P);
+		}
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("Pin name on the destination node; Input pins are preferred when names collide"));
+			Props->SetObjectField(TEXT("to_pin"), P);
+		}
+		TArray<TSharedPtr<FJsonValue>> Required;
+		Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("from_node_id")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("from_pin")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("to_node_id")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("to_pin")));
+		Schema->SetArrayField(TEXT("required"), Required);
+		return Schema;
+	}
+
+	TSharedRef<FJsonObject> MakeSetPinDefaultSchema()
+	{
+		TSharedRef<FJsonObject> Schema = MakeGraphArgsSchema();
+		TSharedRef<FJsonObject> Props = Schema->GetObjectField(TEXT("properties")).ToSharedRef();
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("NodeGuid of the node that owns the pin (from read_graph or add_node node_id)"));
+			Props->SetObjectField(TEXT("node_id"), P);
+		}
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("Name of the input pin whose default value to set, e.g. InString"));
+			Props->SetObjectField(TEXT("pin_name"), P);
+		}
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("New default value as a string (K2 schema converts to the pin's actual type)"));
+			Props->SetObjectField(TEXT("value"), P);
+		}
+		TArray<TSharedPtr<FJsonValue>> Required;
+		Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("node_id")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("pin_name")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("value")));
+		Schema->SetArrayField(TEXT("required"), Required);
+		return Schema;
+	}
 }
 
 void AgentMcp::Tools::RegisterNodeGraphTools()
@@ -365,6 +542,24 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 		Def.InputSchema = MakeAddNodeSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddNode);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("connect_pins");
+		Def.Description = TEXT("Connects two pins in a Blueprint graph. from_pin searches Output pins first; to_pin searches Input pins first. The K2 schema validates the connection and returns its rejection reason on failure. After connecting, call compile_blueprint to verify. Args: blueprint_path, from_node_id, from_pin, to_node_id, to_pin (all required); graph_name (optional, defaults to EventGraph).");
+		Def.InputSchema = MakeConnectPinsSchema();
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleConnectPins);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("set_pin_default");
+		Def.Description = TEXT("Sets the default value of an input pin. The value is a string and is converted by the K2 schema to the pin's actual type (bool: 'true'/'false', int: '42', float: '3.14', string: the literal text). Note: the default is ignored by the compiler while the pin has live connections. Args: blueprint_path, node_id, pin_name, value (all required); graph_name (optional).");
+		Def.InputSchema = MakeSetPinDefaultSchema();
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetPinDefault);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

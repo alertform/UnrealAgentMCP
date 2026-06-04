@@ -232,4 +232,90 @@ bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphConnectPinsTest,
+	"UnrealAgentMCP.NodeGraph.ConnectPinsAndDefaults",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FNodeGraphConnectPinsTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpConnectTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	const TSharedPtr<FJsonObject> EventNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
+	const TSharedPtr<FJsonObject> PrintNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"PrintString\"}"), *Path), bIsError);
+	if (!TestNotNull(TEXT("event created"), EventNode.Get()) || !TestNotNull(TEXT("print created"), PrintNode.Get()))
+	{
+		return true;
+	}
+	const FString EventId = EventNode->GetStringField(TEXT("node_id"));
+	const FString PrintId = PrintNode->GetStringField(TEXT("node_id"));
+
+	// Exec link: BeginPlay.then -> PrintString.execute
+	NodeGraphTestHelpers::CallTool(*this, TEXT("connect_pins"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"from_node_id\":\"%s\",\"from_pin\":\"then\",\"to_node_id\":\"%s\",\"to_pin\":\"execute\"}"), *Path, *EventId, *PrintId), bIsError);
+	TestFalse(TEXT("exec connect succeeds"), bIsError);
+
+	// Verify via read_graph that the link is real.
+	const TSharedPtr<FJsonObject> GraphView = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	bool bLinkFound = false;
+	if (TestNotNull(TEXT("graph view parses"), GraphView.Get()))
+	{
+		for (const TSharedPtr<FJsonValue>& NodeValue : GraphView->GetArrayField(TEXT("nodes")))
+		{
+			const TSharedPtr<FJsonObject> Node = NodeValue->AsObject();
+			if (Node->GetStringField(TEXT("id")) != EventId) { continue; }
+			for (const TSharedPtr<FJsonValue>& PinValue : Node->GetArrayField(TEXT("pins")))
+			{
+				const TSharedPtr<FJsonObject> Pin = PinValue->AsObject();
+				if (Pin->GetStringField(TEXT("name")) != TEXT("then")) { continue; }
+				for (const TSharedPtr<FJsonValue>& LinkValue : Pin->GetArrayField(TEXT("links")))
+				{
+					bLinkFound |= (LinkValue->AsObject()->GetStringField(TEXT("node_id")) == PrintId);
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("read_graph shows the exec link"), bLinkFound);
+
+	// Illegal link (exec out -> exec out) must return the schema's reason text.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("connect_pins"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"from_node_id\":\"%s\",\"from_pin\":\"then\",\"to_node_id\":\"%s\",\"to_pin\":\"then\"}"), *Path, *EventId, *PrintId), bIsError);
+	TestTrue(TEXT("illegal connect is a tool error"), bIsError);
+
+	// set_pin_default on InString, then verify via read_graph.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("set_pin_default"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\",\"pin_name\":\"InString\",\"value\":\"Hello from MCP\"}"), *Path, *PrintId), bIsError);
+	TestFalse(TEXT("set_pin_default succeeds"), bIsError);
+	const TSharedPtr<FJsonObject> GraphView2 = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	bool bDefaultFound = false;
+	if (GraphView2.IsValid())
+	{
+		for (const TSharedPtr<FJsonValue>& NodeValue : GraphView2->GetArrayField(TEXT("nodes")))
+		{
+			const TSharedPtr<FJsonObject> Node = NodeValue->AsObject();
+			if (Node->GetStringField(TEXT("id")) != PrintId) { continue; }
+			for (const TSharedPtr<FJsonValue>& PinValue : Node->GetArrayField(TEXT("pins")))
+			{
+				const TSharedPtr<FJsonObject> Pin = PinValue->AsObject();
+				if (Pin->GetStringField(TEXT("name")) == TEXT("InString"))
+				{
+					FString DefaultValue;
+					Pin->TryGetStringField(TEXT("default_value"), DefaultValue);
+					bDefaultFound = (DefaultValue == TEXT("Hello from MCP"));
+				}
+			}
+		}
+	}
+	TestTrue(TEXT("read_graph shows the new default"), bDefaultFound);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
