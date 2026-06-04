@@ -176,4 +176,59 @@ bool FSafetyUndoRedoTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSafetyConsoleScreenshotAuditTest,
+	"UnrealAgentMCP.Safety.ConsoleScreenshotAuditTail",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FSafetyConsoleScreenshotAuditTest::RunTest(const FString& Parameters)
+{
+	UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
+	const EAgentMcpTier SavedCeiling = Settings->PermissionTier;
+	ON_SCOPE_EXIT { GetMutableDefault<UAgentMcpSettings>()->PermissionTier = SavedCeiling; };
+
+	bool bIsError = false;
+
+	// console_command is Destructive: rejected at the default SafeWrite ceiling.
+	Settings->PermissionTier = EAgentMcpTier::SafeWrite;
+	AgentMcpTestUtils::CallToolRawText(*this, TEXT("console_command"), TEXT("{\"command\":\"stat none\"}"), bIsError);
+	TestTrue(TEXT("console_command rejected at SafeWrite"), bIsError);
+
+	// Allowed at Destructive ceiling; result carries handled+output fields.
+	Settings->PermissionTier = EAgentMcpTier::Destructive;
+	const TSharedPtr<FJsonObject> Console = AgentMcpTestUtils::CallTool(*this, TEXT("console_command"), TEXT("{\"command\":\"stat none\"}"), bIsError);
+	TestFalse(TEXT("console_command ok at Destructive"), bIsError);
+	if (TestNotNull(TEXT("console payload parses"), Console.Get()))
+	{
+		TestTrue(TEXT("has handled field"), Console->HasField(TEXT("handled")));
+		TestTrue(TEXT("has output field"), Console->HasField(TEXT("output")));
+	}
+
+	// take_screenshot queues a request (file only materializes when frames render - E2E).
+	const TSharedPtr<FJsonObject> Shot = AgentMcpTestUtils::CallTool(*this, TEXT("take_screenshot"), TEXT("{}"), bIsError);
+	TestFalse(TEXT("take_screenshot ok"), bIsError);
+	if (TestNotNull(TEXT("screenshot payload parses"), Shot.Get()))
+	{
+		TestTrue(TEXT("queued"), Shot->GetBoolField(TEXT("queued")));
+		TestTrue(TEXT("has path"), Shot->HasField(TEXT("path")));
+	}
+
+	// audit_tail returns recent JSONL entries including the calls above.
+	const TSharedPtr<FJsonObject> Audit = AgentMcpTestUtils::CallTool(*this, TEXT("audit_tail"), TEXT("{\"lines\":50}"), bIsError);
+	TestFalse(TEXT("audit_tail ok"), bIsError);
+	if (TestNotNull(TEXT("audit payload parses"), Audit.Get()))
+	{
+		TestTrue(TEXT("entries present"), static_cast<int32>(Audit->GetNumberField(TEXT("returned"))) > 0);
+		bool bSawConsole = false;
+		bool bSawConsoleStarted = false;
+		for (const TSharedPtr<FJsonValue>& Entry : Audit->GetArrayField(TEXT("entries")))
+		{
+			const FString EntryStr = Entry->AsString();
+			bSawConsole |= EntryStr.Contains(TEXT("console_command"));
+			bSawConsoleStarted |= EntryStr.Contains(TEXT("console_command:started"));
+		}
+		TestTrue(TEXT("console_command visible in audit tail"), bSawConsole);
+		TestTrue(TEXT("console_command:started pre-execute entry in audit tail"), bSawConsoleStarted);
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

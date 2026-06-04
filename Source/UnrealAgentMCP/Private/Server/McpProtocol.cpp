@@ -179,6 +179,16 @@ namespace
 			return MakeToolResultResponse(Id, Rejected, /*bRejectedByTier=*/true);
 		}
 
+		// Destructive tools get a pre-execute audit entry: if the handler crashes or hangs the
+		// editor (console_command can run 'quit'), the invocation that caused it is still on disk.
+		if (Tool->Tier == EAgentMcpTier::Destructive)
+		{
+			FAgentMcpAuditEntry Started;
+			Started.Tool = ToolName + TEXT(":started");
+			Started.ArgsDigest = MakeArgsDigest(Args);
+			FAgentMcpAuditLog::Get().Append(Started);
+		}
+
 		const double StartSeconds = FPlatformTime::Seconds();
 		const FAgentMcpToolResult ToolResult = Tool->Handler.Execute(Args);
 		const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;

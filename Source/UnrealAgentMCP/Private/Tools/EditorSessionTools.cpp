@@ -1,12 +1,16 @@
 #include "Tools/EditorSessionTools.h"
 
+#include "Containers/UnrealString.h"
+#include "Core/AgentMcpAuditLog.h"
 #include "Core/AgentMcpLogCapture.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
+#include "Misc/Paths.h"
 #include "Tools/McpToolUtils.h"
+#include "UnrealClient.h"
 
 namespace
 {
@@ -62,6 +66,72 @@ namespace
 		Result->SetBoolField(TEXT("redone"), bRedone);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	FAgentMcpToolResult HandleConsoleCommand(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString Command;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("command"), Command) || Command.TrimStartAndEnd().IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("console_command requires a non-empty 'command' string."));
+		}
+		if (!GEditor)
+		{
+			return FAgentMcpToolResult::Error(TEXT("GEditor unavailable (not running inside the editor)."));
+		}
+		FStringOutputDevice Output;
+		Output.SetAutoEmitLineTerminator(false);
+		const bool bHandled = GEditor->Exec(GEditor->GetEditorWorldContext().World(), *Command, Output);
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("handled"), bHandled);
+		Result->SetStringField(TEXT("output"), Output);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	FAgentMcpToolResult HandleTakeScreenshot(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString Filename = TEXT("AgentMcp");
+		if (Args.IsValid())
+		{
+			Args->TryGetStringField(TEXT("filename"), Filename);
+		}
+		// Sanitize: bare name only, no path traversal; engine writes under Saved/Screenshots.
+		Filename = FPaths::GetCleanFilename(Filename);
+		if (Filename.IsEmpty())
+		{
+			Filename = TEXT("AgentMcp");
+		}
+		FScreenshotRequest::RequestScreenshot(Filename, /*bInShowUI=*/false, /*bAddFilenameSuffix=*/true);
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("queued"), true);
+		Result->SetStringField(TEXT("path"), FScreenshotRequest::GetFilename());
+		Result->SetStringField(TEXT("note"), TEXT("Screenshot is captured on the next rendered frame; with no viewport rendering (headless) the file never materializes."));
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	FAgentMcpToolResult HandleAuditTail(const TSharedPtr<FJsonObject>& Args)
+	{
+		int32 Count = 50;
+		if (Args.IsValid())
+		{
+			double Number = 0.0;
+			if (Args->TryGetNumberField(TEXT("lines"), Number))
+			{
+				Count = FMath::Clamp(static_cast<int32>(Number), 1, 500);
+			}
+		}
+		const TArray<FString> Entries = FAgentMcpAuditLog::Get().Tail(Count);
+		TArray<TSharedPtr<FJsonValue>> EntryValues;
+		EntryValues.Reserve(Entries.Num());
+		for (const FString& Entry : Entries)
+		{
+			EntryValues.Add(MakeShared<FJsonValueString>(Entry));
+		}
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("file"), FAgentMcpAuditLog::Get().CurrentFilePath());
+		Result->SetNumberField(TEXT("returned"), Entries.Num());
+		Result->SetArrayField(TEXT("entries"), EntryValues);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterEditorSessionTools()
@@ -112,6 +182,63 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleRedo);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("console_command");
+		Def.Description = TEXT("DESTRUCTIVE tier: executes an arbitrary Unreal console command (e.g. stat fps, gc.CollectGarbageEveryFrame 1) including commands that can quit or modify editor state. Requires PermissionTier raised to Destructive in Project Settings > Plugins > Unreal Agent MCP. Returns {handled: bool, output: string}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> CommandProp = MakeShared<FJsonObject>();
+			CommandProp->SetStringField(TEXT("type"), TEXT("string"));
+			CommandProp->SetStringField(TEXT("description"), TEXT("The console command string to execute (e.g. 'stat fps', 'quit')."));
+			Properties->SetObjectField(TEXT("command"), CommandProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("command")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::Destructive;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleConsoleCommand);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("take_screenshot");
+		Def.Description = TEXT("Queues a screenshot request; the file is written on the next rendered frame under Saved/Screenshots/. With no viewport rendering (NullRHI / headless) the file never materializes — use for E2E validation only. Returns {queued: true, path, note}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> FilenameProp = MakeShared<FJsonObject>();
+			FilenameProp->SetStringField(TEXT("type"), TEXT("string"));
+			FilenameProp->SetStringField(TEXT("description"), TEXT("Base filename (no extension, no path). Defaults to 'AgentMcp'. A numeric suffix is always appended."));
+			Properties->SetObjectField(TEXT("filename"), FilenameProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+		}
+		Def.Tier = EAgentMcpTier::ReadOnly;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleTakeScreenshot);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("audit_tail");
+		Def.Description = TEXT("Returns the last N lines of today's JSONL audit log (Saved/AgentMCP/audit-YYYYMMDD.jsonl). Each entry records tool, args digest, duration, is_error, rejected_by_tier. Returns {file, returned, entries:[raw JSONL strings]}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> LinesProp = MakeShared<FJsonObject>();
+			LinesProp->SetStringField(TEXT("type"), TEXT("integer"));
+			LinesProp->SetStringField(TEXT("description"), TEXT("Max entries to return (1-500, default 50)"));
+			Properties->SetObjectField(TEXT("lines"), LinesProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+		}
+		Def.Tier = EAgentMcpTier::ReadOnly;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAuditTail);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
