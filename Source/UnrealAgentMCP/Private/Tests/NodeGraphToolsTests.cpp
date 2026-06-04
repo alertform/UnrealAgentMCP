@@ -382,13 +382,10 @@ bool FNodeGraphClosedLoopTest::RunTest(const FString& Parameters)
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_id\":\"%s\"}"), *Path, *PrintId), bIsError);
 	TestTrue(TEXT("double delete is a tool error"), bIsError);
 
-	// Broken graph produces compile errors that round-trip to the agent:
-	// a variable_get for a variable that doesn't exist can't be built via add_node (it validates),
-	// so instead delete the event's target then verify a dangling exec is at least warning-free —
-	// simplest reliable error: connect InString default removed + call a function node referencing
-	// a deleted variable is not constructible; use a second BP with a K2Node_VariableGet whose
-	// property is renamed post-hoc. To keep the test deterministic, assert messages array exists
-	// on a clean compile instead (error path is covered by tool-level validation tests above).
+	// Deliberately out of scope here: a broken-graph -> compile-error round-trip case. add_node's
+	// validation makes an invalid graph hard to construct deterministically through the tools alone.
+	// TODO(P3): force a compile error via a post-hoc renamed variable on a second BP and assert the
+	// error text reaches the agent through compile_blueprint's messages array.
 	return true;
 }
 

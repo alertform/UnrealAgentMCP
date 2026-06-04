@@ -593,6 +593,10 @@ namespace
 				*Node->GetNodeTitle(ENodeTitleType::ListView).ToString()));
 		}
 
+		// Capture identity before destruction so the agent can confirm it deleted the right node.
+		const FString NodeTitle = Node->GetNodeTitle(ENodeTitleType::ListView).ToString();
+		const FString NodeClass = Node->GetClass()->GetName();
+
 		// --- Mutation: open transaction only after all validation passes ---
 		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "DeleteNode", "MCP: Delete Node"));
 		FBlueprintEditorUtils::RemoveNode(Blueprint, Node, /*bDontRecompile=*/true);
@@ -600,6 +604,8 @@ namespace
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("deleted"), true);
+		Result->SetStringField(TEXT("node_title"), NodeTitle);
+		Result->SetStringField(TEXT("node_class"), NodeClass);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
@@ -662,7 +668,7 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("delete_node");
-		Def.Description = TEXT("Deletes a node from a Blueprint graph. All connected pins are automatically unlinked before removal. The graph is marked structurally modified (Ctrl+Z undoes the deletion). Engine-protected nodes (e.g. construction script entry) cannot be deleted. Args: blueprint_path (required), node_id (required), graph_name (optional).");
+		Def.Description = TEXT("Deletes a node from a Blueprint graph. All connected pins are automatically unlinked before removal; the blueprint is marked dirty for the next compile, and the whole operation is transaction-wrapped so Ctrl+Z undoes it. Engine-protected nodes (e.g. construction script entry) cannot be deleted. Returns {deleted, node_title, node_class}. Args: blueprint_path (required), node_id (required), graph_name (optional).");
 		Def.InputSchema = MakeDeleteNodeSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleDeleteNode);
