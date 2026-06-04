@@ -4,6 +4,7 @@
 
 #include "Server/McpProtocol.h"
 #include "Dom/JsonObject.h"
+#include "Dom/JsonValue.h"
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 
@@ -135,6 +136,54 @@ bool FMcpProtocolIdEdgeCasesTest::RunTest(const FString& Parameters)
 		FString IdString;
 		TestTrue(TEXT("string id echoed as string"), Obj.IsValid() && Obj->TryGetStringField(TEXT("id"), IdString));
 		TestEqual(TEXT("string id value round-trips"), IdString, FString(TEXT("req-abc")));
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMcpToolsEndToEndTest,
+	"UnrealAgentMCP.Tools.EngineInfoAndListAssets",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FMcpToolsEndToEndTest::RunTest(const FString& Parameters)
+{
+	// 模块 StartupModule 已注册工具到 live registry，这里走完整 tools/list -> tools/call 链路。
+	{
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(
+			AgentMcp::Protocol::HandleMessage(TEXT("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}")));
+		const TArray<TSharedPtr<FJsonValue>>& Tools = Obj->GetObjectField(TEXT("result"))->GetArrayField(TEXT("tools"));
+		bool bHasEngineInfo = false, bHasListAssets = false;
+		for (const TSharedPtr<FJsonValue>& Tool : Tools)
+		{
+			const FString Name = Tool->AsObject()->GetStringField(TEXT("name"));
+			bHasEngineInfo |= (Name == TEXT("engine_info"));
+			bHasListAssets |= (Name == TEXT("list_assets"));
+		}
+		TestTrue(TEXT("engine_info listed"), bHasEngineInfo);
+		TestTrue(TEXT("list_assets listed"), bHasListAssets);
+	}
+	{
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
+			TEXT("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"engine_info\"}}")));
+		const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
+		TestFalse(TEXT("engine_info ok"), Result->GetBoolField(TEXT("isError")));
+		const FString Text = Result->GetArrayField(TEXT("content"))[0]->AsObject()->GetStringField(TEXT("text"));
+		TestTrue(TEXT("engine_info payload mentions 5.5"), Text.Contains(TEXT("5.5")));
+	}
+	{
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
+			TEXT("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"list_assets\",\"arguments\":{\"path\":\"/Game\",\"limit\":5}}}")));
+		const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
+		TestFalse(TEXT("list_assets ok"), Result->GetBoolField(TEXT("isError")));
+	}
+	{
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
+			TEXT("{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"list_assets\",\"arguments\":{\"path\":\"no-leading-slash\"}}}")));
+		const TSharedPtr<FJsonObject> Result = Obj->GetObjectField(TEXT("result"));
+		TestTrue(TEXT("bad path is a tool error, not a crash"), Result->GetBoolField(TEXT("isError")));
+	}
+	{
+		const TSharedPtr<FJsonObject> Obj = McpProtocolTestHelpers::Parse(AgentMcp::Protocol::HandleMessage(
+			TEXT("{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\",\"params\":{\"name\":\"no_such_tool\"}}")));
+		TestEqual(TEXT("unknown tool is protocol error"), McpProtocolTestHelpers::GetErrorCode(Obj), -32602);
 	}
 	return true;
 }

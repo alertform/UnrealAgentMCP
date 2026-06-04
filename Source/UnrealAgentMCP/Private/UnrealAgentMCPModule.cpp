@@ -1,10 +1,16 @@
 #include "UnrealAgentMCPModule.h"
 
+#include "Core/AgentMcpToolRegistry.h"
+#include "Tools/AssetQueryTools.h"
+#include "Tools/EditorInfoTools.h"
+
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
 void FUnrealAgentMCPModule::StartupModule()
 {
-	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP module starting (P1 skeleton)"));
+	AgentMcp::Tools::RegisterEditorInfoTools();
+	AgentMcp::Tools::RegisterAssetQueryTools();
+	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 }
 
 void FUnrealAgentMCPModule::ShutdownModule()
