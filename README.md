@@ -42,7 +42,7 @@ Source/UnrealAgentMCP/
 └── Private/
     ├── Server/McpHttpServer.*      transport (engine HTTPServer module, game-thread handlers)
     ├── Tools/                      tool implementations (one family per file)
-    └── Tests/                      automation tests (13 in P1)
+    └── Tests/                      automation tests (30, covering P1-P3)
 ```
 
 Layer contract: the protocol layer never sees HTTP; the transport never sees tools; tools never see JSON-RPC. Everything meets at the registry.

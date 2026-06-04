@@ -375,6 +375,14 @@ bool FToolFamiliesReparentTest::RunTest(const FString& Parameters)
 	AgentMcpTestUtils::CallTool(*this, TEXT("reparent_blueprint"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"new_parent_class\":\"NoSuchParentXyz\"}"), *Path), bIsError);
 	TestTrue(TEXT("unknown parent is a tool error"), bIsError);
+
+	// Cycle guard: reparenting to the blueprint's own generated class must be rejected.
+	if (Blueprint->GeneratedClass)
+	{
+		AgentMcpTestUtils::CallTool(*this, TEXT("reparent_blueprint"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"new_parent_class\":\"%s\"}"), *Path, *Blueprint->GeneratedClass->GetPathName()), bIsError);
+		TestTrue(TEXT("self-reparent is a tool error"), bIsError);
+	}
 	return true;
 }
 
