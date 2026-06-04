@@ -5,6 +5,7 @@
 #include "Core/AgentMcpToolRegistry.h"
 #include "Misc/CoreMisc.h"
 #include "Server/McpHttpServer.h"
+#include "Tools/ActorTools.h"
 #include "Tools/AssetQueryTools.h"
 #include "Tools/EditorInfoTools.h"
 #include "Tools/BlueprintTools.h"
@@ -22,6 +23,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterNodeGraphTools();
 	AgentMcp::Tools::RegisterBlueprintTools();
 	AgentMcp::Tools::RegisterEditorSessionTools();
+	AgentMcp::Tools::RegisterActorTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

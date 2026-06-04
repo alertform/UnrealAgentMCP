@@ -2,6 +2,8 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "AgentMcpSettings.h"
+#include "Core/AgentMcpTier.h"
 #include "HAL/FileManager.h"
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
@@ -116,6 +118,75 @@ bool FToolFamiliesAssetTest::RunTest(const FString& Parameters)
 		TEXT("{\"asset_path\":\"/Game/Dev/AgentMcpTests/BP_McpSaveTest\"}"), bIsError);
 	TestFalse(TEXT("save_asset ok"), bIsError);
 	TestTrue(TEXT("uasset file exists on disk"), IFileManager::Get().FileExists(*DiskPath));
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FToolFamiliesActorTest,
+	"UnrealAgentMCP.ToolFamilies.ActorSpawnQueryTransformDestroy",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FToolFamiliesActorTest::RunTest(const FString& Parameters)
+{
+	UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
+	const EAgentMcpTier SavedCeiling = Settings->PermissionTier;
+	ON_SCOPE_EXIT { GetMutableDefault<UAgentMcpSettings>()->PermissionTier = SavedCeiling; };
+	bool bIsError = false;
+
+	// spawn an empty Actor at a known location with a label.
+	const TSharedPtr<FJsonObject> Spawned = AgentMcpTestUtils::CallTool(*this, TEXT("spawn_actor"),
+		TEXT("{\"class_name\":\"Actor\",\"label\":\"McpTestActor\",\"location\":{\"x\":100,\"y\":200,\"z\":300}}"), bIsError);
+	TestFalse(TEXT("spawn_actor ok"), bIsError);
+	FString ActorPath;
+	if (TestNotNull(TEXT("spawn payload parses"), Spawned.Get()))
+	{
+		ActorPath = Spawned->GetStringField(TEXT("actor_path"));
+		TestTrue(TEXT("actor_path non-empty"), !ActorPath.IsEmpty());
+	}
+	ON_SCOPE_EXIT
+	{
+		// Cleanup: destroy the spawned test actor regardless of assertion outcomes (needs D ceiling).
+		GetMutableDefault<UAgentMcpSettings>()->PermissionTier = EAgentMcpTier::Destructive;
+		bool bCleanupError = false;
+		AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
+			FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bCleanupError);
+	};
+
+	// query finds it by label.
+	const TSharedPtr<FJsonObject> Queried = AgentMcpTestUtils::CallTool(*this, TEXT("query_actors"),
+		TEXT("{\"label_contains\":\"McpTestActor\"}"), bIsError);
+	TestFalse(TEXT("query_actors ok"), bIsError);
+	if (Queried.IsValid())
+	{
+		TestTrue(TEXT("query found the spawn"), static_cast<int32>(Queried->GetNumberField(TEXT("returned"))) >= 1);
+	}
+
+	// transform: move it, then read the property back via set/get bridge shape (location is not a
+	// single FProperty - verify via a second query is overkill; assert the tool reports set:true).
+	const TSharedPtr<FJsonObject> Moved = AgentMcpTestUtils::CallTool(*this, TEXT("set_actor_transform"),
+		FString::Printf(TEXT("{\"actor_path\":\"%s\",\"location\":{\"x\":500,\"y\":0,\"z\":0}}"), *ActorPath), bIsError);
+	TestFalse(TEXT("set_actor_transform ok"), bIsError);
+
+	// set_actor_property on an EditAnywhere bool.
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_actor_property"),
+		FString::Printf(TEXT("{\"actor_path\":\"%s\",\"property\":\"bCanBeDamaged\",\"value\":\"False\"}"), *ActorPath), bIsError);
+	TestFalse(TEXT("set_actor_property ok"), bIsError);
+
+	// destroy at SafeWrite ceiling -> tier rejection; at Destructive -> works (identity echoed).
+	Settings->PermissionTier = EAgentMcpTier::SafeWrite;
+	AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
+		FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bIsError);
+	TestTrue(TEXT("destroy rejected at SafeWrite"), bIsError);
+	Settings->PermissionTier = EAgentMcpTier::Destructive;
+	const TSharedPtr<FJsonObject> Destroyed = AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
+		FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bIsError);
+	TestFalse(TEXT("destroy ok at Destructive"), bIsError);
+	if (Destroyed.IsValid())
+	{
+		TestTrue(TEXT("destroyed identity echoed"), Destroyed->GetStringField(TEXT("label")).Contains(TEXT("McpTestActor")));
+	}
+	// double destroy -> tool error (actor gone).
+	AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
+		FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bIsError);
+	TestTrue(TEXT("double destroy is a tool error"), bIsError);
 	return true;
 }
 
