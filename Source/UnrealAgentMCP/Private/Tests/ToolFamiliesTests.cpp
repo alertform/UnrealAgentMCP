@@ -144,10 +144,13 @@ bool FToolFamiliesActorTest::RunTest(const FString& Parameters)
 	ON_SCOPE_EXIT
 	{
 		// Cleanup: destroy the spawned test actor regardless of assertion outcomes (needs D ceiling).
-		GetMutableDefault<UAgentMcpSettings>()->PermissionTier = EAgentMcpTier::Destructive;
-		bool bCleanupError = false;
-		AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
-			FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bCleanupError);
+		if (!ActorPath.IsEmpty())
+		{
+			GetMutableDefault<UAgentMcpSettings>()->PermissionTier = EAgentMcpTier::Destructive;
+			bool bCleanupError = false;
+			AgentMcpTestUtils::CallTool(*this, TEXT("destroy_actor"),
+				FString::Printf(TEXT("{\"actor_path\":\"%s\"}"), *ActorPath), bCleanupError);
+		}
 	};
 
 	// query finds it by label.

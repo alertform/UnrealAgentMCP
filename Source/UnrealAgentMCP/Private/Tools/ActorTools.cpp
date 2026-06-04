@@ -5,8 +5,10 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
+#include "Engine/LevelScriptActor.h"
 #include "EngineUtils.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/WorldSettings.h"
 #include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/PropertyBridge.h"
@@ -38,6 +40,16 @@ namespace
 		if (!Actor || !IsValid(Actor))
 		{
 			OutError = FString::Printf(TEXT("Actor not found (or pending kill): '%s'. Call query_actors for live paths."), *ActorPath);
+			return nullptr;
+		}
+		// Guard: FindObject searches ALL worlds (PIE duplicates, preview scenes). Mutating or
+		// destroying a non-editor-world actor mid-playtest is unrecoverable - reject anything
+		// outside the editor world.
+		FString WorldError;
+		UWorld* EditorWorld = GetEditorWorld(WorldError);
+		if (!EditorWorld || Actor->GetWorld() != EditorWorld)
+		{
+			OutError = FString::Printf(TEXT("Actor '%s' does not belong to the editor world (PIE or preview actor?). Only editor-world actors are addressable."), *ActorPath);
 			return nullptr;
 		}
 		return Actor;
@@ -118,8 +130,15 @@ namespace
 		FVector Scale = FVector::OneVector;
 		ParseVector(Args, TEXT("location"), Location);
 		ParseRotator(Args, TEXT("rotation"), Rotation);
-		ParseVector(Args, TEXT("scale"), Scale);
+		const bool bHasScale = ParseVector(Args, TEXT("scale"), Scale);
 
+		if (bHasScale && Scale.IsNearlyZero())
+		{
+			return FAgentMcpToolResult::Error(TEXT("scale {0,0,0} is degenerate (collapses the actor); use a small positive value or omit scale."));
+		}
+
+		// GEditor->AddActor opens its own inner transaction; UE coalesces nested transactions under
+		// the outermost scope, so spawn + label land as ONE undo step. The nesting is intentional.
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SpawnActor", "MCP: Spawn Actor"));
 
 		AActor* Actor = GEditor->AddActor(
@@ -169,19 +188,21 @@ namespace
 			return FAgentMcpToolResult::Error(TEXT("set_actor_transform requires at least one of: location {x,y,z}, rotation {pitch,yaw,roll}, scale {x,y,z}."));
 		}
 
+		if (bHasScale && Scale.IsNearlyZero())
+		{
+			return FAgentMcpToolResult::Error(TEXT("scale {0,0,0} is degenerate (collapses the actor); use a small positive value or omit scale."));
+		}
+
 		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetActorTransform", "MCP: Set Actor Transform"));
 		Actor->Modify();
 
-		if (bHasLocation)  { Actor->SetActorLocation(Location); }
-		if (bHasRotation)  { Actor->SetActorRotation(Rotation); }
+		if (bHasLocation)  { Actor->SetActorLocation(Location, /*bSweep=*/false, /*OutSweepHitResult=*/nullptr, ETeleportType::TeleportPhysics); }
+		if (bHasRotation)  { Actor->SetActorRotation(FQuat(Rotation), ETeleportType::TeleportPhysics); }
 		if (bHasScale)     { Actor->SetActorScale3D(Scale); }
-
-		FString ActorPath;
-		Args->TryGetStringField(TEXT("actor_path"), ActorPath);
 
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("set"), true);
-		Result->SetStringField(TEXT("actor_path"), ActorPath);
+		Result->SetStringField(TEXT("actor_path"), Actor->GetPathName());
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
@@ -263,6 +284,11 @@ namespace
 		{
 			AActor* Actor = *It;
 			if (!IsValid(Actor)) { continue; }
+			// System actors are unactionable noise for an agent (and undeletable anyway).
+			if (Actor->IsA<AWorldSettings>() || Actor->IsA<ALevelScriptActor>())
+			{
+				continue;
+			}
 			if (FilterClass && !Actor->IsA(FilterClass)) { continue; }
 			if (!LabelContains.IsEmpty() && !Actor->GetActorLabel().Contains(LabelContains, ESearchCase::IgnoreCase)) { continue; }
 
@@ -291,6 +317,11 @@ namespace
 		if (!Actor)
 		{
 			return FAgentMcpToolResult::Error(Error);
+		}
+
+		if (Actor->IsA<AWorldSettings>() || Actor->IsA<ALevelScriptActor>())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("'%s' is a protected system actor and cannot be destroyed."), *Actor->GetActorLabel()));
 		}
 
 		// Capture identity before destruction (can't access actor after destroy).
