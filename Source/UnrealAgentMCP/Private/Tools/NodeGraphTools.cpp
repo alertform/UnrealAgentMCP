@@ -566,6 +566,59 @@ namespace
 		Schema->SetArrayField(TEXT("required"), Required);
 		return Schema;
 	}
+
+	// -----------------------------------------------------------------------
+	// delete_node
+	// -----------------------------------------------------------------------
+	FAgentMcpToolResult HandleDeleteNode(const TSharedPtr<FJsonObject>& Args)
+	{
+		// --- Validate all args before opening a transaction ---
+		UBlueprint* Blueprint = nullptr;
+		UEdGraph* Graph = nullptr;
+		FString Error;
+		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		FString NodeId;
+		if (!Args->TryGetStringField(TEXT("node_id"), NodeId))
+		{
+			return FAgentMcpToolResult::Error(TEXT("delete_node requires 'node_id'."));
+		}
+		UEdGraphNode* Node = NodeGraphUtils::FindNodeByGuid(Graph, NodeId, Error);
+		if (!Node) { return FAgentMcpToolResult::Error(Error); }
+		if (!Node->CanUserDeleteNode())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Node '%s' cannot be deleted (engine-protected node, e.g. a construction script entry point)."),
+				*Node->GetNodeTitle(ENodeTitleType::ListView).ToString()));
+		}
+
+		// --- Mutation: open transaction only after all validation passes ---
+		const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "DeleteNode", "MCP: Delete Node"));
+		FBlueprintEditorUtils::RemoveNode(Blueprint, Node, /*bDontRecompile=*/true);
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Blueprint);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("deleted"), true);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	TSharedRef<FJsonObject> MakeDeleteNodeSchema()
+	{
+		TSharedRef<FJsonObject> Schema = MakeGraphArgsSchema();
+		TSharedRef<FJsonObject> Props = Schema->GetObjectField(TEXT("properties")).ToSharedRef();
+		{
+			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+			P->SetStringField(TEXT("type"), TEXT("string"));
+			P->SetStringField(TEXT("description"), TEXT("NodeGuid of the node to delete (from read_graph or add_node node_id)"));
+			Props->SetObjectField(TEXT("node_id"), P);
+		}
+		TArray<TSharedPtr<FJsonValue>> Required;
+		Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+		Required.Add(MakeShared<FJsonValueString>(TEXT("node_id")));
+		Schema->SetArrayField(TEXT("required"), Required);
+		return Schema;
+	}
 }
 
 void AgentMcp::Tools::RegisterNodeGraphTools()
@@ -604,6 +657,15 @@ void AgentMcp::Tools::RegisterNodeGraphTools()
 		Def.InputSchema = MakeSetPinDefaultSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetPinDefault);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("delete_node");
+		Def.Description = TEXT("Deletes a node from a Blueprint graph. All connected pins are automatically unlinked before removal. The graph is marked structurally modified (Ctrl+Z undoes the deletion). Engine-protected nodes (e.g. construction script entry) cannot be deleted. Args: blueprint_path (required), node_id (required), graph_name (optional).");
+		Def.InputSchema = MakeDeleteNodeSchema();
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleDeleteNode);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
