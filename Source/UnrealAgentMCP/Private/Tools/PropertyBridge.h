@@ -16,6 +16,9 @@ namespace AgentMcp::PropertyBridge
 	 * Resolves Property by name, requires CPF_Edit (mirrors Remote Control's constraint), imports
 	 * Value via ImportText_Direct. Returns false + OutError on unknown/uneditable property or parse
 	 * failure (the engine's import error text is included). Caller owns Modify()/transactions.
+	 * bRejectTemplateDisabled: pass true when Container is a CDO/archetype — rejects EditInstanceOnly
+	 * properties (CPF_DisableEditOnTemplate), matching what the Details panel allows on templates.
+	 * Instance callers (actors, components) leave it false: EditInstanceOnly is legal there.
 	 */
-	bool SetPropertyFromString(UObject* Container, const FString& PropertyName, const FString& Value, FString& OutError);
+	bool SetPropertyFromString(UObject* Container, const FString& PropertyName, const FString& Value, FString& OutError, bool bRejectTemplateDisabled = false);
 }

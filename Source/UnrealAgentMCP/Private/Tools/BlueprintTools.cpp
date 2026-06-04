@@ -171,7 +171,7 @@ namespace
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetCdoProperty", "MCP: Set CDO Property"));
 		Cdo->Modify();
 
-		if (!PropertyBridge::SetPropertyFromString(Cdo, PropertyName, Value, Error))
+		if (!PropertyBridge::SetPropertyFromString(Cdo, PropertyName, Value, Error, /*bRejectTemplateDisabled=*/true))
 		{
 			Transaction.Cancel();
 			return FAgentMcpToolResult::Error(Error);
@@ -266,7 +266,7 @@ void AgentMcp::Tools::RegisterBlueprintTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("set_cdo_property");
-		Def.Description = TEXT("Sets a property on a Blueprint's Class Default Object (CDO). value uses UE ImportText syntax (True/False for booleans, 42 for integers, (X=1,Y=2,Z=3) for vectors, /Script/... for object paths). Only EditAnywhere/EditDefaultsOnly properties are accepted; non-editable properties return an error. Changes propagate to instances on next compile_blueprint. Args: blueprint_path (required), property (required), value (required). Returns {set, property, value (readback)}.");
+		Def.Description = TEXT("Sets a property on a Blueprint's Class Default Object (CDO). value uses UE ImportText syntax (True/False for booleans, 42 for integers, (X=1,Y=2,Z=3) for vectors, /Script/... for object paths). Only EditAnywhere/EditDefaultsOnly properties are accepted; non-editable properties return an error. Note: object-reference values (/Game/...) synchronously LOAD the referenced asset into the editor. Changes propagate to instances on next compile_blueprint. Args: blueprint_path (required), property (required), value (required). Returns {set, property, value (readback)}.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
