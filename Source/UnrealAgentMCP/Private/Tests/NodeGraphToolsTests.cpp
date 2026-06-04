@@ -145,4 +145,91 @@ bool FBlueprintToolsCreateCompileTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FNodeGraphAddNodeTest,
+	"UnrealAgentMCP.NodeGraph.AddNodeTypes",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FNodeGraphAddNodeTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = NodeGraphTestHelpers::MakeTransientBlueprint(TEXT("BP_McpAddNodeTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	// call_function: KismetSystemLibrary.PrintString
+	const TSharedPtr<FJsonObject> CallNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"PrintString\",\"pos_x\":400,\"pos_y\":100}"), *Path), bIsError);
+	TestFalse(TEXT("add call_function succeeds"), bIsError);
+	if (TestNotNull(TEXT("call node payload parses"), CallNode.Get()))
+	{
+		TestTrue(TEXT("returns node_id"), CallNode->HasField(TEXT("node_id")));
+		bool bHasInString = false;
+		for (const TSharedPtr<FJsonValue>& PinValue : CallNode->GetArrayField(TEXT("pins")))
+		{
+			bHasInString |= (PinValue->AsObject()->GetStringField(TEXT("name")) == TEXT("InString"));
+		}
+		TestTrue(TEXT("PrintString node exposes InString pin"), bHasInString);
+	}
+
+	// event: ReceiveBeginPlay — first call returns an enabled node...
+	const TSharedPtr<FJsonObject> EventNode = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
+	TestFalse(TEXT("add event succeeds"), bIsError);
+	FString FirstEventId;
+	if (TestNotNull(TEXT("event payload parses"), EventNode.Get()))
+	{
+		FirstEventId = EventNode->GetStringField(TEXT("node_id"));
+	}
+	// ...second call must reuse it (existing: true, same id), never duplicate.
+	const TSharedPtr<FJsonObject> EventAgain = NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"event\",\"event_name\":\"ReceiveBeginPlay\"}"), *Path), bIsError);
+	TestFalse(TEXT("re-add event succeeds"), bIsError);
+	if (TestNotNull(TEXT("second event payload parses"), EventAgain.Get()))
+	{
+		TestTrue(TEXT("second add reports existing"), EventAgain->GetBoolField(TEXT("existing")));
+		TestEqual(TEXT("same node id"), EventAgain->GetStringField(TEXT("node_id")), FirstEventId);
+	}
+
+	// Extra assertion: the event node must be enabled (not a ghost) so compile and execution work.
+	const TSharedPtr<FJsonObject> GraphAfterEvent = NodeGraphTestHelpers::CallTool(*this, TEXT("read_graph"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	TestFalse(TEXT("read_graph after add event succeeds"), bIsError);
+	if (TestNotNull(TEXT("graph view parses"), GraphAfterEvent.Get()))
+	{
+		bool bFoundEventEnabled = false;
+		for (const TSharedPtr<FJsonValue>& NodeValue : GraphAfterEvent->GetArrayField(TEXT("nodes")))
+		{
+			const TSharedPtr<FJsonObject> Node = NodeValue->AsObject();
+			if (Node->GetStringField(TEXT("id")) == FirstEventId)
+			{
+				bFoundEventEnabled = Node->GetBoolField(TEXT("enabled"));
+				break;
+			}
+		}
+		TestTrue(TEXT("event node reports enabled==true via read_graph"), bFoundEventEnabled);
+	}
+
+	// branch + sequence + self spawn fine.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"branch\"}"), *Path), bIsError);
+	TestFalse(TEXT("add branch succeeds"), bIsError);
+	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"sequence\"}"), *Path), bIsError);
+	TestFalse(TEXT("add sequence succeeds"), bIsError);
+	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"self\"}"), *Path), bIsError);
+	TestFalse(TEXT("add self succeeds"), bIsError);
+
+	// Errors: unknown function / unknown node_type are tool errors.
+	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"call_function\",\"class_name\":\"KismetSystemLibrary\",\"function_name\":\"NoSuchFunctionXyz\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown function is a tool error"), bIsError);
+	NodeGraphTestHelpers::CallTool(*this, TEXT("add_node"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"node_type\":\"flux_capacitor\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown node_type is a tool error"), bIsError);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
