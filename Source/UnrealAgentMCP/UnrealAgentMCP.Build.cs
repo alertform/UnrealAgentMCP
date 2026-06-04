@@ -25,6 +25,12 @@ public class UnrealAgentMCP : ModuleRules
 			"SubobjectDataInterface",
 			"EnhancedInput",
 			"InputCore",
+			"UMG",
+			"UMGEditor",
+			"ModelViewViewModelEditor",
+			"ModelViewViewModelBlueprint",
+			"ModelViewViewModel",
+			"FieldNotification",
 		});
 	}
 }
