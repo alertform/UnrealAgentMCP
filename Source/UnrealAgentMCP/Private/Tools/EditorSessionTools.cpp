@@ -106,7 +106,7 @@ namespace
 		// Build the expected path locally: FScreenshotRequest::GetFilename() is a shared static that
 		// is only populated when a request is SERVICED on a rendered frame — reading it here would
 		// return the previous screenshot's path (or nothing), not this request's.
-		Result->SetStringField(TEXT("path"), FPaths::Combine(FPaths::ScreenshotDir(), Filename));
+		Result->SetStringField(TEXT("path"), FPaths::Combine(FPaths::ScreenShotDir(), Filename));
 		Result->SetStringField(TEXT("note"), TEXT("Captured on the next rendered frame; the engine appends a numeric suffix to the filename. With no viewport rendering (headless) the file never materializes."));
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
