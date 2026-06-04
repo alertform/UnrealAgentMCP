@@ -2,7 +2,11 @@
 
 #include "CoreMinimal.h"
 
-/** One audited tool invocation (or tier rejection). */
+/**
+ * One audited tool invocation (or tier rejection).
+ * Spec §5 lists a transaction-name field; deliberately omitted — transaction names are mechanically
+ * derived from tool names ("MCP: Add Node" <-> add_node), so Tool already disambiguates.
+ */
 struct FAgentMcpAuditEntry
 {
 	FString Tool;

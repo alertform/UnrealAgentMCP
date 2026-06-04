@@ -189,6 +189,8 @@ namespace
 			FAgentMcpAuditLog::Get().Append(Started);
 		}
 
+		// CONTRACT: Tool is a raw pointer into the registry map, invalidated by any Register() call.
+		// Handlers must never register tools during execution (registration is startup-only).
 		const double StartSeconds = FPlatformTime::Seconds();
 		const FAgentMcpToolResult ToolResult = Tool->Handler.Execute(Args);
 		const double ElapsedMs = (FPlatformTime::Seconds() - StartSeconds) * 1000.0;

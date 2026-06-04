@@ -14,7 +14,8 @@ public:
 	/** Live registry used by the protocol layer. */
 	static FAgentMcpToolRegistry& Get();
 
-	/** Registers a tool. Re-registering the same name overwrites (last wins). Invalidates all pointers previously returned by Find(). */
+	/** Registers a tool. Re-registering the same name overwrites (last wins). Invalidates all pointers previously returned by Find().
+	 *  Must not be called while a tool handler is executing (the dispatch seam holds a raw Find() pointer across Execute). */
 	void Register(FAgentMcpToolDef&& Def);
 
 	/**

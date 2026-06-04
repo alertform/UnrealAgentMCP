@@ -228,6 +228,8 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 			Properties->SetObjectField(TEXT("filename"), FilenameProp);
 			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
 		}
+		// ReadOnly by the tier's letter: a screenshot writes a PNG under Saved/Screenshots (disk
+		// side-effect) but touches no EDITOR STATE — no transaction, no asset, nothing undoable.
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleTakeScreenshot);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));

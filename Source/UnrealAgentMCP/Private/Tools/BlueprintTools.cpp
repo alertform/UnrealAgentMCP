@@ -7,11 +7,14 @@
 #include "Dom/JsonValue.h"
 #include "Engine/Blueprint.h"
 #include "GameFramework/Actor.h"
+#include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Logging/TokenizedMessage.h"
+#include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
+#include "Tools/PropertyBridge.h"
 #include "UObject/UObjectGlobals.h"
 
 namespace
@@ -102,6 +105,88 @@ namespace
 		// Compile errors are the agent's correction signal, NOT a tool failure.
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	/** Shared: resolve blueprint_path arg -> CDO. Returns nullptr + OutError on failure. */
+	UObject* ResolveCdo(const TSharedPtr<FJsonObject>& Args, UBlueprint*& OutBlueprint, FString& OutError)
+	{
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			OutError = TEXT("Missing required string argument 'blueprint_path'.");
+			return nullptr;
+		}
+		OutBlueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, OutError);
+		if (!OutBlueprint)
+		{
+			return nullptr;
+		}
+		UClass* Generated = OutBlueprint->GeneratedClass;
+		if (!Generated || !Generated->GetDefaultObject())
+		{
+			OutError = TEXT("Blueprint has no generated class/CDO yet - call compile_blueprint first.");
+			return nullptr;
+		}
+		return Generated->GetDefaultObject();
+	}
+
+	FAgentMcpToolResult HandleGetCdoProperty(const TSharedPtr<FJsonObject>& Args)
+	{
+		UBlueprint* Blueprint = nullptr;
+		FString Error;
+		UObject* Cdo = ResolveCdo(Args, Blueprint, Error);
+		if (!Cdo) { return FAgentMcpToolResult::Error(Error); }
+
+		FString PropertyName;
+		if (!Args->TryGetStringField(TEXT("property"), PropertyName))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'property'."));
+		}
+		FString Value, Type;
+		if (!PropertyBridge::GetPropertyAsString(Cdo, PropertyName, Value, Type, Error))
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetStringField(TEXT("property"), PropertyName);
+		Result->SetStringField(TEXT("value"), Value);
+		Result->SetStringField(TEXT("type"), Type);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	FAgentMcpToolResult HandleSetCdoProperty(const TSharedPtr<FJsonObject>& Args)
+	{
+		UBlueprint* Blueprint = nullptr;
+		FString Error;
+		UObject* Cdo = ResolveCdo(Args, Blueprint, Error);
+		if (!Cdo) { return FAgentMcpToolResult::Error(Error); }
+
+		FString PropertyName, Value;
+		if (!Args->TryGetStringField(TEXT("property"), PropertyName) || !Args->TryGetStringField(TEXT("value"), Value))
+		{
+			return FAgentMcpToolResult::Error(TEXT("set_cdo_property requires 'property' and 'value' strings."));
+		}
+
+		// Non-const so failure paths can Cancel() — avoids leaving an empty undo entry when
+		// validation fails after Modify() (mirrors the add_node Cancel pattern in NodeGraphTools.cpp).
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "SetCdoProperty", "MCP: Set CDO Property"));
+		Cdo->Modify();
+
+		if (!PropertyBridge::SetPropertyFromString(Cdo, PropertyName, Value, Error))
+		{
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(Error);
+		}
+		FBlueprintEditorUtils::MarkBlueprintAsModified(Blueprint);
+
+		FString ReadBack, Type;
+		PropertyBridge::GetPropertyAsString(Cdo, PropertyName, ReadBack, Type, Error);
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("set"), true);
+		Result->SetStringField(TEXT("property"), PropertyName);
+		Result->SetStringField(TEXT("value"), ReadBack);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterBlueprintTools()
@@ -150,6 +235,63 @@ void AgentMcp::Tools::RegisterBlueprintTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleCompileBlueprint);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("get_cdo_property");
+		Def.Description = TEXT("Reads a property value from a Blueprint's Class Default Object (CDO) and returns it as a UE text string. Args: blueprint_path (required), property (required, case-sensitive C++ member name, e.g. bCanBeDamaged). Returns {property, value, type}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
+			PathProp->SetStringField(TEXT("type"), TEXT("string"));
+			PathProp->SetStringField(TEXT("description"), TEXT("Path of the Blueprint, e.g. /Game/Dev/BP_MyActor"));
+			Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
+			TSharedRef<FJsonObject> PropProp = MakeShared<FJsonObject>();
+			PropProp->SetStringField(TEXT("type"), TEXT("string"));
+			PropProp->SetStringField(TEXT("description"), TEXT("Case-sensitive C++ property name on the CDO, e.g. bCanBeDamaged"));
+			Properties->SetObjectField(TEXT("property"), PropProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("property")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::ReadOnly;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleGetCdoProperty);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("set_cdo_property");
+		Def.Description = TEXT("Sets a property on a Blueprint's Class Default Object (CDO). value uses UE ImportText syntax (True/False for booleans, 42 for integers, (X=1,Y=2,Z=3) for vectors, /Script/... for object paths). Only EditAnywhere/EditDefaultsOnly properties are accepted; non-editable properties return an error. Changes propagate to instances on next compile_blueprint. Args: blueprint_path (required), property (required), value (required). Returns {set, property, value (readback)}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
+			PathProp->SetStringField(TEXT("type"), TEXT("string"));
+			PathProp->SetStringField(TEXT("description"), TEXT("Path of the Blueprint, e.g. /Game/Dev/BP_MyActor"));
+			Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
+			TSharedRef<FJsonObject> PropProp = MakeShared<FJsonObject>();
+			PropProp->SetStringField(TEXT("type"), TEXT("string"));
+			PropProp->SetStringField(TEXT("description"), TEXT("Case-sensitive C++ property name, e.g. bCanBeDamaged"));
+			Properties->SetObjectField(TEXT("property"), PropProp);
+			TSharedRef<FJsonObject> ValProp = MakeShared<FJsonObject>();
+			ValProp->SetStringField(TEXT("type"), TEXT("string"));
+			ValProp->SetStringField(TEXT("description"), TEXT("Value in UE ImportText format: True/False (bool), 42 (int), 3.14 (float), (X=1,Y=2,Z=3) (vector), /Game/Path.Asset (object ref)"));
+			Properties->SetObjectField(TEXT("value"), ValProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("property")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("value")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSetCdoProperty);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
