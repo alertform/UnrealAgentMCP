@@ -27,9 +27,12 @@ namespace
 		OutPackagePath = AssetPath;
 		FString Discard;
 		OutPackagePath.Split(TEXT("."), &OutPackagePath, &Discard); // tolerate object-path form
-		if (!OutPackagePath.Split(TEXT("/"), nullptr, &OutAssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd) || OutAssetName.IsEmpty())
+		// Require a parent folder: bare mount roots like "/Game" would otherwise yield a junk "/Game.Game" asset.
+		FString ParentPath;
+		if (!OutPackagePath.Split(TEXT("/"), &ParentPath, &OutAssetName, ESearchCase::CaseSensitive, ESearchDir::FromEnd) ||
+			OutAssetName.IsEmpty() || ParentPath.IsEmpty())
 		{
-			OutError = FString::Printf(TEXT("Cannot derive an asset name from '%s'."), *AssetPath);
+			OutError = FString::Printf(TEXT("Cannot derive an asset name from '%s'. Use a folder under a mount root, e.g. /Game/Input/IA_Jump."), *AssetPath);
 			return false;
 		}
 		return true;
@@ -137,6 +140,8 @@ namespace
 		TAssetClass* Asset = FindObject<TAssetClass>(nullptr, *ObjectPath);
 		if (!Asset)
 		{
+			// Intentional synchronous load: editor-tool latency is acceptable, and it keeps
+			// on-disk (not-yet-loaded) assets addressable by path.
 			Asset = LoadObject<TAssetClass>(nullptr, *ObjectPath);
 		}
 		if (!Asset)
