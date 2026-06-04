@@ -7,12 +7,14 @@
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Editor.h"
 #include "Engine/Blueprint.h"
 #include "FileHelpers.h"
 #include "HAL/FileManager.h"
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
+#include "Subsystems/EditorAssetSubsystem.h"
 #include "Tools/McpToolUtils.h"
 #include "UObject/Package.h"
 
@@ -344,6 +346,89 @@ namespace
 		Result->SetStringField(TEXT("package"), Package->GetName());
 		return FAgentMcpToolResult::Success(AgentMcp::ToolUtils::SerializeObject(Result));
 	}
+
+	FAgentMcpToolResult HandleDeleteAsset(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString AssetPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("asset_path"), AssetPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'asset_path'."));
+		}
+		bool bForce = false;
+		if (Args.IsValid()) { Args->TryGetBoolField(TEXT("force"), bForce); }
+
+		if (GEditor && GEditor->PlayWorld)
+		{
+			return FAgentMcpToolResult::Error(TEXT("Cannot delete assets during Play-In-Editor."));
+		}
+
+		// Normalize to package name: strip object suffix if present.
+		FString PackageName = AssetPath;
+		{
+			int32 DotIdx = INDEX_NONE;
+			if (PackageName.FindChar(TEXT('.'), DotIdx)) { PackageName = PackageName.Left(DotIdx); }
+		}
+
+		// On-disk referencer pre-check: DeleteAsset/DeleteLoadedAsset force-delete (null referencers),
+		// so this gate is the safety contract for accidental reference breakage.
+		IAssetRegistry& Registry = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+		TArray<FName> Referencers;
+		Registry.GetReferencers(FName(*PackageName), Referencers, UE::AssetRegistry::EDependencyCategory::Package);
+		Referencers.RemoveAll([&PackageName](const FName& N) { return N == FName(*PackageName); });
+		if (Referencers.Num() > 0 && !bForce)
+		{
+			FString List;
+			for (const FName& R : Referencers)
+			{
+				List += (List.IsEmpty() ? TEXT("") : TEXT(", ")) + R.ToString();
+			}
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("'%s' has %d on-disk referencer(s): %s. Pass force=true to delete anyway (their references will be NULLED)."),
+				*PackageName, Referencers.Num(), *List));
+		}
+
+		UEditorAssetSubsystem* Subsystem = GEditor ? GEditor->GetEditorSubsystem<UEditorAssetSubsystem>() : nullptr;
+		if (!Subsystem)
+		{
+			return FAgentMcpToolResult::Error(TEXT("EditorAssetSubsystem unavailable."));
+		}
+
+		// Existence pre-check: a missing asset must be OUR error, not an engine call —
+		// the subsystem logs at Error severity on not-found, which would fail automation runs
+		// and spam the Output Log for a case the agent can handle from the response alone.
+		bool bDeleted = false;
+		const FString ShortName = FPackageName::GetShortName(PackageName);
+		const FString ObjectPath = PackageName + TEXT(".") + ShortName;
+		UObject* Loaded = FindObject<UObject>(nullptr, *ObjectPath);
+		if (!Loaded && !Registry.GetAssetByObjectPath(FSoftObjectPath(ObjectPath)).IsValid())
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Asset not found: '%s' (neither loaded in memory nor in the asset registry)."), *AssetPath));
+		}
+
+		// Prefer the loaded-object route: handles in-memory-only assets that were never saved to disk.
+		if (Loaded)
+		{
+			bDeleted = Subsystem->DeleteLoadedAsset(Loaded);
+		}
+		else
+		{
+			bDeleted = Subsystem->DeleteAsset(AssetPath);
+		}
+
+		if (!bDeleted)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Delete failed for '%s' — it may be open in an asset editor or pinned by in-memory references (see Output Log)."),
+				*AssetPath));
+		}
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("deleted"), true);
+		Result->SetStringField(TEXT("asset_path"), AssetPath);
+		Result->SetBoolField(TEXT("forced"), bForce);
+		return FAgentMcpToolResult::Success(AgentMcp::ToolUtils::SerializeObject(Result));
+	}
 } // namespace
 
 void AgentMcp::Tools::RegisterAssetQueryTools()
@@ -487,6 +572,37 @@ void AgentMcp::Tools::RegisterAssetQueryTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleSaveAsset);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// ── delete_asset ──────────────────────────────────────────────────────────
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("delete_asset");
+		Def.Description = TEXT("Destructive. Deletes an asset. Refuses when on-disk referencers exist unless force=true (force NULLS their references). In-memory references are not detectable — save first for accurate checks. Rejected at SafeWrite ceiling. Returns {deleted:true, asset_path, forced}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> AssetPathProp = MakeShared<FJsonObject>();
+			AssetPathProp->SetStringField(TEXT("type"), TEXT("string"));
+			AssetPathProp->SetStringField(TEXT("description"), TEXT("Package or object path of the asset to delete, e.g. /Game/Blueprints/BP_Foo."));
+			Props->SetObjectField(TEXT("asset_path"), AssetPathProp);
+
+			TSharedRef<FJsonObject> ForceProp = MakeShared<FJsonObject>();
+			ForceProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			ForceProp->SetStringField(TEXT("description"), TEXT("When true, deletes even if on-disk referencers exist (their references will be NULLED). Default: false."));
+			Props->SetObjectField(TEXT("force"), ForceProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("asset_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::Destructive;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleDeleteAsset);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

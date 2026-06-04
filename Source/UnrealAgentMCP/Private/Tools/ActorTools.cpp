@@ -247,11 +247,13 @@ namespace
 		FString ClassName;
 		FString LabelContains;
 		int32 Limit = 100;
+		bool bIncludeSystem = false;
 
 		if (Args.IsValid())
 		{
 			Args->TryGetStringField(TEXT("class_name"), ClassName);
 			Args->TryGetStringField(TEXT("label_contains"), LabelContains);
+			Args->TryGetBoolField(TEXT("include_system"), bIncludeSystem);
 			double LimitNumber = 0.0;
 			if (Args->TryGetNumberField(TEXT("limit"), LimitNumber))
 			{
@@ -284,11 +286,10 @@ namespace
 		{
 			AActor* Actor = *It;
 			if (!IsValid(Actor)) { continue; }
-			// System actors are unactionable noise for an agent (and undeletable anyway).
-			if (Actor->IsA<AWorldSettings>() || Actor->IsA<ALevelScriptActor>())
-			{
-				continue;
-			}
+			// Level-script actors are never exposed (editor internal, not addressable by agents).
+			if (Actor->IsA<ALevelScriptActor>()) { continue; }
+			// WorldSettings is opt-in: only returned when the caller explicitly requests system actors.
+			if (Actor->IsA<AWorldSettings>() && !bIncludeSystem) { continue; }
 			if (FilterClass && !Actor->IsA(FilterClass)) { continue; }
 			if (!LabelContains.IsEmpty() && !Actor->GetActorLabel().Contains(LabelContains, ESearchCase::IgnoreCase)) { continue; }
 
@@ -484,7 +485,7 @@ void AgentMcp::Tools::RegisterActorTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("query_actors");
-		Def.Description = TEXT("Lists actors in the editor world with optional class and label filters. Returns {total, returned, actors:[{label, actor_path, class}]}. actor_path values are valid inputs for set_actor_transform, set_actor_property, and destroy_actor.");
+		Def.Description = TEXT("Lists actors in the editor world with optional class and label filters. Returns {total, returned, actors:[{label, actor_path, class}]}. actor_path values are valid inputs for set_actor_transform, set_actor_property, and destroy_actor. include_system (optional bool): include the WorldSettings actor, e.g. to set DefaultGameMode (GameMode Override). Level-script actors are never returned.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
@@ -504,6 +505,11 @@ void AgentMcp::Tools::RegisterActorTools()
 			LimitProp->SetStringField(TEXT("type"), TEXT("integer"));
 			LimitProp->SetStringField(TEXT("description"), TEXT("Max number of actors to return (1-1000, default 100)."));
 			Props->SetObjectField(TEXT("limit"), LimitProp);
+
+			TSharedRef<FJsonObject> IncludeSystemProp = MakeShared<FJsonObject>();
+			IncludeSystemProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			IncludeSystemProp->SetStringField(TEXT("description"), TEXT("When true, includes the WorldSettings actor so its properties (e.g. DefaultGameMode) can be read or set. Level-script actors are never returned regardless. Default: false."));
+			Props->SetObjectField(TEXT("include_system"), IncludeSystemProp);
 
 			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
 		}
