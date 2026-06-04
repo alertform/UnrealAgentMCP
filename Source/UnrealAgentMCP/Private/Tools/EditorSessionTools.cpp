@@ -95,7 +95,7 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("undo");
-		Def.Description = TEXT("Undoes the most recent editor transaction (equivalent to Ctrl+Z) - including this plugin's own MCP: transactions. Returns {undone}.");
+		Def.Description = TEXT("Undoes the most recent editor transaction (Ctrl+Z) on the EDITOR-WIDE undo stack - the top transaction may be a user's manual edit, not necessarily an MCP operation. Only call when you know no concurrent user editing is happening. Returns {undone: bool}; false means the undo stack was empty or unavailable.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
@@ -106,7 +106,7 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("redo");
-		Def.Description = TEXT("Redoes the most recently undone editor transaction (Ctrl+Y). Returns {redone}.");
+		Def.Description = TEXT("Redoes the most recently undone editor transaction (Ctrl+Y) on the EDITOR-WIDE redo stack (same bluntness caveat as undo). Returns {redone: bool}; false means nothing to redo.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());

@@ -156,6 +156,8 @@ bool FSafetyUndoRedoTest::RunTest(const FString& Parameters)
 	TestFalse(TEXT("add branch ok"), bIsError);
 	TestEqual(TEXT("node added"), CountNodes(), Before + 1);
 
+	// undo is editor-wide: this test assumes NO intervening transaction lands between the
+	// add_node above and the undo below (read_graph is read-only; audit writes files, not transactions).
 	const TSharedPtr<FJsonObject> UndoResult = AgentMcpTestUtils::CallTool(*this, TEXT("undo"), TEXT("{}"), bIsError);
 	TestFalse(TEXT("undo tool ok"), bIsError);
 	if (UndoResult.IsValid())
