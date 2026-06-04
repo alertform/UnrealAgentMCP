@@ -11,6 +11,7 @@
 #include "Tools/BlueprintTools.h"
 #include "Tools/EditorSessionTools.h"
 #include "Tools/NodeGraphTools.h"
+#include "Tools/VariableComponentTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
@@ -24,6 +25,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterBlueprintTools();
 	AgentMcp::Tools::RegisterEditorSessionTools();
 	AgentMcp::Tools::RegisterActorTools();
+	AgentMcp::Tools::RegisterVariableComponentTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

@@ -193,4 +193,57 @@ bool FToolFamiliesActorTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FToolFamiliesVariableTest,
+	"UnrealAgentMCP.ToolFamilies.VariableAddAndFlags",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FToolFamiliesVariableTest::RunTest(const FString& Parameters)
+{
+	UBlueprint* Blueprint = AgentMcpTestUtils::MakeTransientBlueprint(TEXT("BP_McpVarTest"));
+	if (!TestNotNull(TEXT("transient blueprint created"), Blueprint))
+	{
+		return true;
+	}
+	const FString Path = Blueprint->GetPathName();
+	bool bIsError = false;
+
+	// add a float (real) variable with a default, then a class-reference variable.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_variable"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"variable_name\":\"McpHealth\",\"type\":\"real\",\"default_value\":\"42.5\"}"), *Path), bIsError);
+	TestFalse(TEXT("add real variable ok"), bIsError);
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_variable"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"variable_name\":\"McpActorClass\",\"type\":\"class:Actor\"}"), *Path), bIsError);
+	TestFalse(TEXT("add class-ref variable ok"), bIsError);
+
+	// duplicate name -> tool error.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_variable"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"variable_name\":\"McpHealth\",\"type\":\"bool\"}"), *Path), bIsError);
+	TestTrue(TEXT("duplicate variable is a tool error"), bIsError);
+
+	// unknown type token -> tool error listing supported tokens.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_variable"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"variable_name\":\"McpBad\",\"type\":\"flux\"}"), *Path), bIsError);
+	TestTrue(TEXT("unknown type is a tool error"), bIsError);
+
+	// flags: instance editable + expose on spawn round-trip (verify via compile success + no error).
+	AgentMcpTestUtils::CallTool(*this, TEXT("set_variable_flags"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"variable_name\":\"McpHealth\",\"instance_editable\":true,\"expose_on_spawn\":true}"), *Path), bIsError);
+	TestFalse(TEXT("set_variable_flags ok"), bIsError);
+
+	// compile clean after all of it; CDO carries the default.
+	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	if (Compiled.IsValid())
+	{
+		TestEqual(TEXT("compiles clean with new variables"), static_cast<int32>(Compiled->GetNumberField(TEXT("num_errors"))), 0);
+	}
+	const TSharedPtr<FJsonObject> Got = AgentMcpTestUtils::CallTool(*this, TEXT("get_cdo_property"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"property\":\"McpHealth\"}"), *Path), bIsError);
+	TestFalse(TEXT("read new variable off CDO ok"), bIsError);
+	if (Got.IsValid())
+	{
+		TestTrue(TEXT("default landed"), Got->GetStringField(TEXT("value")).StartsWith(TEXT("42.5")));
+	}
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
