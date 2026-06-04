@@ -5,6 +5,8 @@
 #include "AgentMcpSettings.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
+#include "Editor.h"
+#include "GameFramework/WorldSettings.h"
 #include "Misc/ScopeExit.h"
 #include "Tests/AgentMcpTestHelpers.h"
 #include "WidgetBlueprint.h"
@@ -91,6 +93,23 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSystemActorAccessTest,
 bool FSystemActorAccessTest::RunTest(const FString& Parameters)
 {
 	bool bIsError = false;
+
+	// Belt-and-braces isolation: whatever happens below (failed restore call, mid-test
+	// assertion failures — TestFalse does not early-return), leave the editor world's
+	// GameMode Override untouched. (T3 review finding.)
+	ON_SCOPE_EXIT
+	{
+		if (GEditor)
+		{
+			if (UWorld* World = GEditor->GetEditorWorldContext().World())
+			{
+				if (AWorldSettings* WS = World->GetWorldSettings())
+				{
+					WS->DefaultGameMode = nullptr;
+				}
+			}
+		}
+	};
 
 	// Step 1 — query_actors without include_system: must NOT contain WorldSettings.
 	{
@@ -217,7 +236,7 @@ bool FDeleteAssetTest::RunTest(const FString& Parameters)
 		TestTrue(TEXT("rejected_by_tier field present and true"), bDiscriminator);
 	}
 
-	// Raise ceiling to Destructive for remaining steps.
+	// Step 2 — raise ceiling to Destructive for remaining steps.
 	Settings->PermissionTier = EAgentMcpTier::Destructive;
 
 	// Step 3 — non-existent asset path: must return an error.

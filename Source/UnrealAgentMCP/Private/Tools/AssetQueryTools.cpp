@@ -355,7 +355,7 @@ namespace
 			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'asset_path'."));
 		}
 		bool bForce = false;
-		if (Args.IsValid()) { Args->TryGetBoolField(TEXT("force"), bForce); }
+		Args->TryGetBoolField(TEXT("force"), bForce); // Args validity established above
 
 		if (GEditor && GEditor->PlayWorld)
 		{
@@ -363,6 +363,8 @@ namespace
 		}
 
 		// Normalize to package name: strip object suffix if present.
+		// (First-dot split assumes UE convention: no '.' in directory segments; the Content
+		//  Browser cannot produce them.)
 		FString PackageName = AssetPath;
 		{
 			int32 DotIdx = INDEX_NONE;
@@ -396,6 +398,9 @@ namespace
 		// Existence pre-check: a missing asset must be OUR error, not an engine call —
 		// the subsystem logs at Error severity on not-found, which would fail automation runs
 		// and spam the Output Log for a case the agent can handle from the response alone.
+		// (Object name == package short name is assumed — true for every asset this plugin
+		//  creates and for Content-Browser assets; exotic code-created mismatches will report
+		//  not-found.)
 		bool bDeleted = false;
 		const FString ShortName = FPackageName::GetShortName(PackageName);
 		const FString ObjectPath = PackageName + TEXT(".") + ShortName;
@@ -413,7 +418,9 @@ namespace
 		}
 		else
 		{
-			bDeleted = Subsystem->DeleteAsset(AssetPath);
+			// Use the normalized ObjectPath (the same string the existence pre-check verified),
+			// not the caller's raw input (review finding).
+			bDeleted = Subsystem->DeleteAsset(ObjectPath);
 		}
 
 		if (!bDeleted)
