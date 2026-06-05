@@ -74,7 +74,7 @@ namespace
 	TSharedRef<FJsonObject> RunCompileAndCollect(UBlueprint* BP)
 	{
 		FCompilerResultsLog Results;
-		FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::None, &Results);
+		FKismetEditorUtilities::CompileBlueprint(BP, EBlueprintCompileOptions::SkipGarbageCollection, &Results);
 
 		TArray<TSharedPtr<FJsonValue>> Messages;
 		for (const TSharedRef<FTokenizedMessage>& Msg : Results.Messages)
@@ -368,19 +368,22 @@ namespace
 				// Fallback: try function (FieldNotify properties may use getter/setter pairs).
 				WidgetFunc = WidgetClass->FindFunctionByName(FName(*WidgetPropName));
 			}
-			if (!WidgetField && !WidgetFunc)
-			{
-				return FAgentMcpToolResult::Error(FString::Printf(
-					TEXT("Widget property or function '%s' not found on widget class '%s'. "
-						"Verify the property name (e.g. 'Text' for TextBlock, 'Value' for SpinBox)."),
-					*WidgetPropName, *WidgetClass->GetName()));
-			}
 		}
-		if (!bIsSelf && !WidgetField && !WidgetFunc)
+		// Validate-first invariant — covers BOTH the self-context and widget branches. A null
+		// field here would make AppendPropertyPath silently no-op below and leak a blank
+		// destination path (T6 review finding: the self branch previously skipped this guard).
+		if (!WidgetField && !WidgetFunc)
 		{
-			// Already handled above, but be safe.
+			if (bIsSelf)
+			{
+				const FString SkelName = WBP->SkeletonGeneratedClass ? WBP->SkeletonGeneratedClass->GetName() : TEXT("<null skeleton>");
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Self-context property or function '%s' not found on the WidgetBlueprint's class '%s'. The blueprint may need a compile first, or the name is wrong."),
+					*WidgetPropName, *SkelName));
+			}
 			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("Widget property or function '%s' not found on widget '%s'."), *WidgetPropName, *WidgetNameStr));
+				TEXT("Widget property or function '%s' not found on widget class '%s'. Verify the property name (e.g. 'Text' for TextBlock, 'Value' for SpinBox)."),
+				*WidgetPropName, *TargetWidget->GetClass()->GetName()));
 		}
 
 		// ── Get MVVM subsystem + view ───────────────────────────────────────
@@ -574,6 +577,7 @@ void AgentMcp::Tools::RegisterMvvmTools()
 			"Adds an MVVM view binding between a viewmodel property and a widget property in a WidgetBlueprint. "
 			"Uses validate-first design: all inputs are validated before any binding row is created, so no dangling "
 			"blank bindings are left behind on error. "
+			"NOTE: bound:true means the binding ROW was created — check the embedded compile object (num_errors) for functional success. "
 			"IMPORTANT: The viewmodel must be added first with add_viewmodel. "
 			"IMPORTANT: viewmodel_property must be a FieldNotify-enabled property — the engine silently no-ops on invalid paths; this tool surfaces that as an explicit error. "
 			"Args: blueprint_path (req), widget_name (req — use list_widgets), widget_property (req — e.g. 'Text'), "
