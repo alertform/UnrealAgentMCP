@@ -143,6 +143,19 @@ namespace
 
 		// Validate / create target package.
 		const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
+
+		// Pre-check asset registry for on-disk duplicates before touching in-memory state.
+		{
+			FAssetRegistryModule& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+			const FString ShortAssetName = FPackageName::GetShortName(PackageName);
+			const FSoftObjectPath DiskPath(PackageName + TEXT(".") + ShortAssetName);
+			if (AR.Get().GetAssetByObjectPath(DiskPath).IsValid())
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("An asset already exists at '%s' on disk. Choose a different asset_path."), *AssetPath));
+			}
+		}
+
 		if (FindObject<UPackage>(nullptr, *PackageName))
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(
@@ -163,6 +176,7 @@ namespace
 		UAnimMontage* Montage = NewObject<UAnimMontage>(Pkg, MontageName, RF_Public | RF_Standalone | RF_Transactional);
 		if (!Montage)
 		{
+			Transaction.Cancel();
 			return FAgentMcpToolResult::Error(TEXT("NewObject<UAnimMontage> returned null. Engine error."));
 		}
 
@@ -311,6 +325,7 @@ namespace
 		UAnimNotify* NotifyInstance = NewObject<UAnimNotify>(AnimAsset, NotifyClass, NAME_None, RF_Transactional);
 		if (!NotifyInstance)
 		{
+			Transaction.Cancel();
 			return FAgentMcpToolResult::Error(FString::Printf(
 				TEXT("Failed to create notify instance of class '%s'."), *NotifyClassToken));
 		}
@@ -331,11 +346,20 @@ namespace
 		// Name: use the class-provided notify name, falling back to the class short name.
 		NewEvent.NotifyName = FName(*NotifyInstance->GetNotifyName());
 
+		// Guid required — SAnimNotifyPanel purges events with !Guid.IsValid() on next Persona refresh.
+		NewEvent.Guid = FGuid::NewGuid();
+
 		// Add to the Notifies array and register in the track's pointer list.
 		AnimAsset->Notifies.Add(NewEvent);
 		// Re-acquire pointer after Add (may reallocate).
-		FAnimNotifyEvent* AddedEvent = &AnimAsset->Notifies.Last();
-		AnimAsset->AnimNotifyTracks[TrackIdx].Notifies.Add(AddedEvent);
+		FAnimNotifyEvent& AddedEvent = AnimAsset->Notifies.Last();
+		AnimAsset->AnimNotifyTracks[TrackIdx].Notifies.Add(&AddedEvent);
+
+		// Fire editor-init hook so the notify can set up default state (e.g. populate properties).
+		if (AddedEvent.Notify)
+		{
+			AddedEvent.Notify->OnAnimNotifyCreatedInEditor(AddedEvent);
+		}
 
 		// Apply optional properties via ImportText.
 		TArray<FString> SetProps;

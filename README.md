@@ -60,7 +60,7 @@ Source/UnrealAgentMCP/
 └── Private/
     ├── Server/McpHttpServer.*      transport (engine HTTPServer module, game-thread handlers)
     ├── Tools/                      tool implementations (one family per file)
-    └── Tests/                      automation tests (50, covering P1-P7)
+    └── Tests/                      automation tests (45, covering P1-P7)
 ```
 
 Layer contract: the protocol layer never sees HTTP; the transport never sees tools; tools never see JSON-RPC. Everything meets at the registry.
@@ -78,7 +78,7 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAgentMCP" -TestExit="Automation Test Queue Empty" -NullRHI -unattended -nopause -nosplash -log
 ```
 
-42 tests (baseline): registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5), P3b tool families — CDO get/set, asset search/info/refs/save, actor spawn/query/transform/destroy, variable add/flags, component add/attach/set, reparent (7), input + layout — input asset creation, mapping entries, auto_layout invariants (3), P5 widget + MVVM + gap-fill — class pin defaults, system-actor access, referencer-gated delete, widget-tree authoring, component bound events, MVVM authoring error contracts, binding list/remove lifecycle (7), P6 polish — widget rename incl. MVVM reference sync, dirty-package listing (2). **+8 P7 tests** (1.3-dev): FCreateAnimMontageTest, FAddAnimNotifyTest, FSetGeTargetTagsTest (each with multiple error-path assertions).
+42 tests (baseline): registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5), P3b tool families — CDO get/set, asset search/info/refs/save, actor spawn/query/transform/destroy, variable add/flags, component add/attach/set, reparent (7), input + layout — input asset creation, mapping entries, auto_layout invariants (3), P5 widget + MVVM + gap-fill — class pin defaults, system-actor access, referencer-gated delete, widget-tree authoring, component bound events, MVVM authoring error contracts, binding list/remove lifecycle (7), P6 polish — widget rename incl. MVVM reference sync, dirty-package listing (2). **+3 P7 tests** (1.3-dev): FCreateAnimMontageTest, FAddAnimNotifyTest, FSetGeTargetTagsTest (each with multiple error-path assertions).
 
 ## Smoke test (curl)
 

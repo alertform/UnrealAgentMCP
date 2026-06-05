@@ -17,8 +17,12 @@
 #include "GameplayTagContainer.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/ScopeExit.h"
+#include "NativeGameplayTags.h"
 #include "Tests/AgentMcpTestHelpers.h"
 #include "UObject/Package.h"
+
+// Plugin-local test tag — independent of any host project's tag registrations.
+UE_DEFINE_GAMEPLAY_TAG_STATIC(TAG_AgentMcpTestTarget, "AgentMcp.Test.TargetTag");
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -28,9 +32,6 @@ namespace
 {
 	// A guaranteed-present AnimSequence from the project's Mannequin content.
 	constexpr const TCHAR* KIdleAnimPath = TEXT("/Game/Characters/Mannequins/Animations/Manny/MM_Idle");
-
-	// Tag registered natively by the host project — always present in the editor process.
-	constexpr const TCHAR* KMeleeAttackTag = TEXT("Ability.Melee.Attack");
 
 	// Temporary asset paths created during tests (all under /Game/Dev_Test/).
 	constexpr const TCHAR* KMontageTestPath  = TEXT("/Game/Dev_Test/AM_McpCreateMontageTest");
@@ -233,11 +234,12 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 	}
 	const FString BpPath = CreateResult->GetStringField(TEXT("blueprint_path"));
 
-	// Step 2 — set_ge_target_tags with the native Ability.Melee.Attack tag.
+	// Step 2 — set_ge_target_tags with the plugin-local test tag.
+	const FString TestTagStr = TAG_AgentMcpTestTarget.GetTag().ToString();
 	const TSharedPtr<FJsonObject> SetResult = AgentMcpTestUtils::CallTool(*this, TEXT("set_ge_target_tags"),
 		FString::Printf(
 			TEXT("{\"blueprint_path\":\"%s\",\"granted_tags\":[\"%s\"]}"),
-			*BpPath, KMeleeAttackTag),
+			*BpPath, *TestTagStr),
 		bIsError);
 	TestFalse(TEXT("set_ge_target_tags succeeds"), bIsError);
 	if (TestNotNull(TEXT("set result parses"), SetResult.Get()))
@@ -248,12 +250,12 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 		bool bTagFound = false;
 		for (const TSharedPtr<FJsonValue>& TagVal : SetResult->GetArrayField(TEXT("granted_tags")))
 		{
-			if (TagVal->AsString().Contains(TEXT("Melee.Attack"), ESearchCase::IgnoreCase))
+			if (TagVal->AsString().Contains(TEXT("AgentMcp.Test.TargetTag"), ESearchCase::IgnoreCase))
 			{
 				bTagFound = true;
 			}
 		}
-		TestTrue(TEXT("response granted_tags contains Melee.Attack"), bTagFound);
+		TestTrue(TEXT("response granted_tags contains AgentMcp.Test.TargetTag"), bTagFound);
 
 		TestEqual(TEXT("component is UTargetTagsGameplayEffectComponent"),
 			SetResult->GetStringField(TEXT("component")),
@@ -272,11 +274,10 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 			if (Comp)
 			{
 				const FInheritedTagContainer& Tags = Comp->GetConfiguredTargetTagChanges();
-				const bool bInAdded = Tags.Added.HasTagExact(
-					FGameplayTag::RequestGameplayTag(FName(KMeleeAttackTag)));
-				const bool bInCombined = Tags.CombinedTags.HasTagExact(
-					FGameplayTag::RequestGameplayTag(FName(KMeleeAttackTag)));
-				TestTrue(TEXT("Melee.Attack tag present in Added or CombinedTags"),
+				const FGameplayTag TestTag = TAG_AgentMcpTestTarget.GetTag();
+				const bool bInAdded = Tags.Added.HasTagExact(TestTag);
+				const bool bInCombined = Tags.CombinedTags.HasTagExact(TestTag);
+				TestTrue(TEXT("AgentMcp.Test.TargetTag present in Added or CombinedTags"),
 					bInAdded || bInCombined);
 			}
 		}
@@ -306,7 +307,7 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 			const FString NonGeErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("set_ge_target_tags"),
 				FString::Printf(
 					TEXT("{\"blueprint_path\":\"%s\",\"granted_tags\":[\"%s\"]}"),
-					*ActorBpPath, KMeleeAttackTag),
+					*ActorBpPath, *TestTagStr),
 				bIsError);
 			TestTrue(TEXT("non-GE blueprint is error"), bIsError);
 			TestTrue(TEXT("non-GE error mentions GameplayEffect"),
