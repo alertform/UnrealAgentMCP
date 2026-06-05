@@ -404,6 +404,17 @@ bool FWidgetTreeAuthoringTest::RunTest(const FString& Parameters)
 			bIsError);
 		TestTrue(TEXT("non-IUserListEntry entry class is error"), bIsError);
 		TestTrue(TEXT("error mentions IUserListEntry"), BadEntryErr.Contains(TEXT("IUserListEntry"), ESearchCase::IgnoreCase));
+
+		// Step 9b — content path WITHOUT the _C suffix must normalize (1.2: callers shouldn't
+		// need to know the generated-class form). Uses a real repo asset.
+		const TSharedPtr<FJsonObject> NormResult = AgentMcpTestUtils::CallTool(*this, TEXT("set_widget_property"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"TestListView\",\"property\":\"EntryWidgetClass\",\"value\":\"/Game/UI/WBP_MASessionRowWidget\"}"), *Path),
+			bIsError);
+		TestFalse(TEXT("EntryWidgetClass sans _C resolves"), bIsError);
+		if (TestNotNull(TEXT("normalized set parses"), NormResult.Get()))
+		{
+			TestTrue(TEXT("set:true"), NormResult->GetBoolField(TEXT("set")));
+		}
 	}
 
 	return true;

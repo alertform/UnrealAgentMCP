@@ -217,11 +217,19 @@ namespace
 		// Decision: iterate and cap at 8 to avoid ballooning the response for assets
 		// with many auto-generated tags (e.g. StaticMesh LOD data). Clients needing
 		// all tags can call this tool and filter; the cap keeps the response lean.
+		// FiBData (Find-in-Blueprint binary blob) and any value >2048 chars are filtered —
+		// dogfooding showed FiBData alone can inflate a single response to 45 KB.
 		TSharedRef<FJsonObject> TagsObj = MakeShared<FJsonObject>();
 		int32 TagCount = 0;
 		for (auto It = AssetData.TagsAndValues.CreateConstIterator(); It && TagCount < 8; ++It, ++TagCount)
 		{
-			TagsObj->SetStringField(It.Key().ToString(), It.Value().AsString());
+			const FString TagName = It.Key().ToString();
+			FString Value = It.Value().AsString();
+			if (TagName == TEXT("FiBData") || Value.Len() > 2048)
+			{
+				Value = FString::Printf(TEXT("<filtered: %d chars>"), Value.Len());
+			}
+			TagsObj->SetStringField(TagName, Value);
 		}
 		Result->SetObjectField(TEXT("tags"), TagsObj);
 

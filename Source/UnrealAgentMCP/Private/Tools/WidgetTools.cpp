@@ -1,5 +1,8 @@
 #include "Tools/WidgetTools.h"
 
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "BaseWidgetBlueprint.h"
 #include "Blueprint/IUserListEntry.h"
 #include "Blueprint/UserWidget.h"
@@ -15,6 +18,7 @@
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/PackageName.h"
+#include "Modules/ModuleManager.h"
 #include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
@@ -50,21 +54,18 @@ namespace
 		return WBP;
 	}
 
-	/**
-	 * Resolves a widget class from a short name like "Button"/"TextBlock"/"VerticalBox"
-	 * (tries /Script/UMG.<Name> first via TryFindTypeSlow) or a full path like
-	 * /Game/UI/WBP_MyWidget. The resolved class must be a UWidget subclass.
-	 */
-	UClass* ResolveWidgetClass(const FString& ClassToken, FString& OutError)
+	/** Resolves a class token: in-memory name/path, /Game content path (with or without
+	 *  .Name_C suffix — normalized), or /Script/ native path. Returns nullptr when unresolvable.
+	 *  Shared by ResolveWidgetClass and the EntryWidgetClass special-case in HandleSetWidgetProperty. */
+	UClass* ResolveClassToken(const FString& Token)
 	{
-		// TryFindTypeSlow handles both short names and full /Script/ paths.
-		UClass* Class = UClass::TryFindTypeSlow<UClass>(ClassToken);
-		if (!Class && ClassToken.StartsWith(TEXT("/")) && !ClassToken.StartsWith(TEXT("/Script/")))
+		UClass* Class = UClass::TryFindTypeSlow<UClass>(Token);
+		if (!Class && Token.StartsWith(TEXT("/")) && !Token.StartsWith(TEXT("/Script/")))
 		{
 			// Content path (user widget): accept /Game/UI/WBP_X, /Game/UI/WBP_X.WBP_X and
 			// /Game/UI/WBP_X.WBP_X_C alike — normalize to the generated-class object path
-			// (T4 review finding: callers naturally omit the _C suffix).
-			FString ClassPath = ClassToken;
+			// (T4 review finding: callers naturally omit the _C suffix; 1.2 dogfooding confirmed).
+			FString ClassPath = Token;
 			if (!ClassPath.EndsWith(TEXT("_C")))
 			{
 				FString PackagePath = ClassPath;
@@ -78,8 +79,80 @@ namespace
 					ClassPath = FString::Printf(TEXT("%s.%s_C"), *ClassPath, *FPackageName::GetShortName(ClassPath));
 				}
 			}
+			// Try loading the _C generated class directly first (covers already-compiled BPs).
 			Class = LoadObject<UClass>(nullptr, *ClassPath);
+			if (!Class)
+			{
+				// _C not in memory — consult the asset registry for the Blueprint's
+				// GeneratedClass tag. The registry stores the full generated-class object
+				// path (e.g. /Game/UI/WBP_X.WBP_X_C) as tag "GeneratedClass" without
+				// loading the asset. TryFindTypeSlow on that path resolves the in-memory
+				// class when the blueprint was compiled earlier this session; if it's still
+				// null the registry's NativeParentClass tag gives us the C++ base which
+				// carries the correct IUserListEntry/interface bits for validation.
+				FString PackagePath = ClassPath;
+				int32 DotIdx = INDEX_NONE;
+				if (PackagePath.FindChar(TEXT('.'), DotIdx))
+				{
+					PackagePath = PackagePath.Left(DotIdx);
+				}
+				IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
+				// Do NOT call AR.WaitForCompletion() — in -NullRHI automation runs it triggers
+				// a FlushAsyncLoading that queues WBP packages which then stall (widget compiler
+				// is unavailable), preventing the metadata from being indexed. The registry
+				// file-scan metadata is already available for already-discovered assets.
+				const FString AssetName = FPackageName::GetShortName(PackagePath);
+				TArray<FAssetData> Found;
+				AR.GetAssetsByPackageName(FName(*PackagePath), Found);
+				if (Found.Num() == 0)
+				{
+					const FAssetData DirectData = AR.GetAssetByObjectPath(
+						FSoftObjectPath(PackagePath + TEXT(".") + AssetName));
+					if (DirectData.IsValid())
+					{
+						Found.Add(DirectData);
+					}
+				}
+				if (Found.Num() > 0)
+				{
+					// Blueprint tag values use export-text format (e.g. "Class'/Script/Mod.Foo'").
+					// FPackageName::ExportTextPathToObjectPath strips the wrapper to a plain path
+					// (/Script/Mod.Foo) that TryFindTypeSlow can resolve.
+					auto ResolveTagClass = [](const FString& TagValue) -> UClass*
+					{
+						const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(TagValue);
+						return UClass::TryFindTypeSlow<UClass>(ObjectPath.IsEmpty() ? TagValue : ObjectPath);
+					};
+
+					// Try GeneratedClass tag first (the compiled _C object path).
+					FAssetTagValueRef GenClassTag = Found[0].TagsAndValues.FindTag(TEXT("GeneratedClass"));
+					if (GenClassTag.IsSet())
+					{
+						Class = ResolveTagClass(GenClassTag.AsString());
+					}
+					// Fall back to NativeParentClass (the C++ base — always available at runtime).
+					if (!Class)
+					{
+						FAssetTagValueRef NativeParentTag = Found[0].TagsAndValues.FindTag(TEXT("NativeParentClass"));
+						if (NativeParentTag.IsSet())
+						{
+							Class = ResolveTagClass(NativeParentTag.AsString());
+						}
+					}
+				}
+			}
 		}
+		return Class;
+	}
+
+	/**
+	 * Resolves a widget class from a short name like "Button"/"TextBlock"/"VerticalBox"
+	 * (tries /Script/UMG.<Name> first via TryFindTypeSlow) or a full path like
+	 * /Game/UI/WBP_MyWidget. The resolved class must be a UWidget subclass.
+	 */
+	UClass* ResolveWidgetClass(const FString& ClassToken, FString& OutError)
+	{
+		UClass* Class = ResolveClassToken(ClassToken);
 		if (!Class)
 		{
 			// Fallback: try prefixing /Script/UMG. for bare names like "Button".
@@ -368,13 +441,11 @@ namespace
 		}
 
 		// Special-case EntryWidgetClass: verify the class implements IUserListEntry.
+		// ResolveClassToken handles /Game content paths with or without the _C suffix
+		// (1.2 dogfooding: callers pass /Game/UI/WBP_X, not the generated /Game/UI/WBP_X.WBP_X_C).
 		if (PropertyName.Equals(TEXT("EntryWidgetClass"), ESearchCase::IgnoreCase))
 		{
-			UClass* EntryClass = UClass::TryFindTypeSlow<UClass>(Value);
-			if (!EntryClass)
-			{
-				EntryClass = LoadObject<UClass>(nullptr, *Value);
-			}
+			UClass* EntryClass = ResolveClassToken(Value);
 			if (!EntryClass)
 			{
 				return FAgentMcpToolResult::Error(FString::Printf(
@@ -386,6 +457,10 @@ namespace
 					TEXT("Class '%s' does not implement IUserListEntry; it cannot be used as EntryWidgetClass."),
 					*EntryClass->GetName()));
 			}
+			// Normalize Value to the resolved class's full path so PropertyBridge can set the
+			// property even when the caller passed a /Game/ path without the _C suffix — the class
+			// IS in memory at this point, so GetPathName() is always valid.
+			Value = EntryClass->GetPathName();
 		}
 
 		// Transaction + set.
