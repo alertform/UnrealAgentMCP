@@ -86,16 +86,19 @@ namespace
 				}
 			}
 			// Try loading the _C generated class directly first (covers already-compiled BPs).
+			// NOTE: safe only when the package is already resident — a cold synchronous load
+			// of a WidgetBlueprint can stall in -NullRHI automation (widget compiler absent).
 			Class = LoadObject<UClass>(nullptr, *ClassPath);
 			if (!Class)
 			{
 				// _C not in memory — consult the asset registry for the Blueprint's
-				// GeneratedClass tag. The registry stores the full generated-class object
-				// path (e.g. /Game/UI/WBP_X.WBP_X_C) as tag "GeneratedClass" without
-				// loading the asset. TryFindTypeSlow on that path resolves the in-memory
-				// class when the blueprint was compiled earlier this session; if it's still
-				// null the registry's NativeParentClass tag gives us the C++ base which
-				// carries the correct IUserListEntry/interface bits for validation.
+				// GeneratedClass tag (the full generated-class object path, stored without
+				// loading the asset). TryFindTypeSlow resolves it when the class is resident;
+				// LoadObject is the last resort for the not-yet-resident case.
+				// Deliberately NO NativeParentClass fallback: substituting the bare C++ base
+				// for the Blueprint class would silently break consumers like EntryWidgetClass
+				// (no widget tree, no bindings) — an unresolvable class must be an ERROR
+				// (T1 review finding).
 				FString PackagePath = ClassPath;
 				int32 DotIdx = INDEX_NONE;
 				if (PackagePath.FindChar(TEXT('.'), DotIdx))
@@ -121,28 +124,18 @@ namespace
 				}
 				if (Found.Num() > 0)
 				{
-					// Blueprint tag values use export-text format (e.g. "Class'/Script/Mod.Foo'").
-					// FPackageName::ExportTextPathToObjectPath strips the wrapper to a plain path
-					// (/Script/Mod.Foo) that TryFindTypeSlow can resolve.
-					auto ResolveTagClass = [](const FString& TagValue) -> UClass*
-					{
-						const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(TagValue);
-						return UClass::TryFindTypeSlow<UClass>(ObjectPath.IsEmpty() ? TagValue : ObjectPath);
-					};
-
-					// Try GeneratedClass tag first (the compiled _C object path).
+					// Blueprint tag values use export-text format (e.g. "Class'/Game/X.X_C'").
+					// FPackageName::ExportTextPathToObjectPath strips the wrapper to a plain path.
 					FAssetTagValueRef GenClassTag = Found[0].TagsAndValues.FindTag(TEXT("GeneratedClass"));
 					if (GenClassTag.IsSet())
 					{
-						Class = ResolveTagClass(GenClassTag.AsString());
-					}
-					// Fall back to NativeParentClass (the C++ base — always available at runtime).
-					if (!Class)
-					{
-						FAssetTagValueRef NativeParentTag = Found[0].TagsAndValues.FindTag(TEXT("NativeParentClass"));
-						if (NativeParentTag.IsSet())
+						const FString TagValue = GenClassTag.AsString();
+						const FString ObjectPath = FPackageName::ExportTextPathToObjectPath(TagValue);
+						const FString& ResolvePath = ObjectPath.IsEmpty() ? TagValue : ObjectPath;
+						Class = UClass::TryFindTypeSlow<UClass>(ResolvePath);
+						if (!Class)
 						{
-							Class = ResolveTagClass(NativeParentTag.AsString());
+							Class = LoadObject<UClass>(nullptr, *ResolvePath);
 						}
 					}
 				}
@@ -455,7 +448,7 @@ namespace
 			if (!EntryClass)
 			{
 				return FAgentMcpToolResult::Error(FString::Printf(
-					TEXT("Could not resolve EntryWidgetClass value '%s' to a UClass."), *Value));
+					TEXT("Could not resolve EntryWidgetClass value '%s' to a UClass. Ensure the Blueprint is compiled in this editor session (open it once, or compile_blueprint it)."), *Value));
 			}
 			if (!EntryClass->ImplementsInterface(UUserListEntry::StaticClass()))
 			{
