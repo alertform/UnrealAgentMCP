@@ -3,6 +3,8 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "AgentMcpSettings.h"
+#include "MVVMBlueprintView.h"
+#include "MVVMEditorSubsystem.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Editor.h"
@@ -507,6 +509,128 @@ bool FComponentEventTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("compile status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
 		TestEqual(TEXT("compile num_errors 0"), (int32)Compiled->GetNumberField(TEXT("num_errors")), 0);
+	}
+
+	return true;
+}
+
+
+// ---------------------------------------------------------------------------
+// FMvvmAuthoringTest
+// Verifies add_viewmodel + add_view_binding.
+//
+// NOTE on success-binding coverage:
+//   A fully-valid add_view_binding success path requires a VM class with FieldNotify
+//   properties. UMVVMViewModelBase (the only VM type available from engine modules without
+//   a host-project dependency) has NONE. The success path is therefore exercised end-to-end
+//   in T8 against UMAMainMenuViewModel which lives in the host project. Here we verify:
+//   (a) viewmodel add/duplicate/invalid-class
+//   (b) the silent-no-op trap is surfaced as an explicit error (viewmodel property not found)
+//   (c) widget-not-found and direction validation errors
+//   (d) structural correctness: the validate-first design means no dangling binding rows are
+//       created by the failed add_view_binding attempts.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMvvmAuthoringTest,
+	"UnrealAgentMCP.P5.MvvmAuthoring",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FMvvmAuthoringTest::RunTest(const FString& Parameters)
+{
+	// Step 1 — create a transient WBP and add a TextBlock widget as root.
+	UWidgetBlueprint* WBP = AgentMcpTestUtils::MakeTransientWidgetBlueprint(TEXT("WBP_McpMvvmAuthoringTest"));
+	if (!TestNotNull(TEXT("transient WBP created"), WBP))
+	{
+		return true;
+	}
+	const FString Path = WBP->GetPathName();
+	bool bIsError = false;
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"TextBlock\",\"widget_name\":\"StatusLabel\",\"as_root\":true}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add TextBlock StatusLabel succeeds"), bIsError);
+
+	// Step 2 — add_viewmodel with UMVVMViewModelBase -> {added:true, name:"TestVM"} + non-empty viewmodel_id.
+	const TSharedPtr<FJsonObject> AddVMResult = AgentMcpTestUtils::CallTool(*this, TEXT("add_viewmodel"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"viewmodel_class\":\"/Script/ModelViewViewModel.MVVMViewModelBase\",\"name\":\"TestVM\",\"creation_type\":\"manual\"}"),
+			*Path),
+		bIsError);
+	TestFalse(TEXT("add_viewmodel UMVVMViewModelBase succeeds"), bIsError);
+	FString ViewModelId;
+	if (TestNotNull(TEXT("add_viewmodel result parses"), AddVMResult.Get()))
+	{
+		TestTrue(TEXT("added:true"), AddVMResult->GetBoolField(TEXT("added")));
+		TestEqual(TEXT("name is TestVM"), AddVMResult->GetStringField(TEXT("name")), FString(TEXT("TestVM")));
+		ViewModelId = AddVMResult->GetStringField(TEXT("viewmodel_id"));
+		TestFalse(TEXT("viewmodel_id is non-empty"), ViewModelId.IsEmpty());
+	}
+
+	// Step 3 — duplicate add_viewmodel -> error containing "already".
+	const FString DupVMErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_viewmodel"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"viewmodel_class\":\"/Script/ModelViewViewModel.MVVMViewModelBase\",\"name\":\"TestVM\",\"creation_type\":\"manual\"}"),
+			*Path),
+		bIsError);
+	TestTrue(TEXT("duplicate add_viewmodel is error"), bIsError);
+	TestTrue(TEXT("duplicate error mentions 'already'"),
+		DupVMErr.Contains(TEXT("already"), ESearchCase::IgnoreCase));
+
+	// Step 4 — non-VM class (AActor) -> error containing "NotifyFieldValueChanged".
+	const FString NonVMErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_viewmodel"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"viewmodel_class\":\"/Script/Engine.Actor\",\"name\":\"BadVM\"}"),
+			*Path),
+		bIsError);
+	TestTrue(TEXT("non-VM class is error"), bIsError);
+	TestTrue(TEXT("non-VM error mentions NotifyFieldValueChanged"),
+		NonVMErr.Contains(TEXT("NotifyFieldValueChanged"), ESearchCase::IgnoreCase));
+
+	// Step 5 — add_view_binding with invalid viewmodel_property (the silent-no-op trap):
+	//   UMVVMViewModelBase has no FieldNotify properties, so "NoSuchProp" must be caught
+	//   and returned as an explicit error containing "not found".
+	const FString NoVMPropErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_view_binding"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"StatusLabel\",\"widget_property\":\"Text\",\"viewmodel_name\":\"TestVM\",\"viewmodel_property\":\"NoSuchProp\",\"direction\":\"one_way\"}"),
+			*Path),
+		bIsError);
+	TestTrue(TEXT("invalid VM property is error"), bIsError);
+	TestTrue(TEXT("error mentions 'not found'"),
+		NoVMPropErr.Contains(TEXT("not found"), ESearchCase::IgnoreCase));
+
+	// Step 6 — add_view_binding with non-existent widget -> error containing "list_widgets".
+	const FString NoWidgetErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_view_binding"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NoSuchWidget\",\"widget_property\":\"Text\",\"viewmodel_name\":\"TestVM\",\"viewmodel_property\":\"NoSuchProp\",\"direction\":\"one_way\"}"),
+			*Path),
+		bIsError);
+	TestTrue(TEXT("missing widget is error"), bIsError);
+	TestTrue(TEXT("missing widget error mentions list_widgets"),
+		NoWidgetErr.Contains(TEXT("list_widgets"), ESearchCase::IgnoreCase));
+
+	// Step 7 — add_view_binding with invalid direction token -> error listing valid directions.
+	const FString BadDirErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("add_view_binding"),
+		FString::Printf(
+			TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"StatusLabel\",\"widget_property\":\"Text\",\"viewmodel_name\":\"TestVM\",\"viewmodel_property\":\"NoSuchProp\",\"direction\":\"sideways\"}"),
+			*Path),
+		bIsError);
+	TestTrue(TEXT("bad direction is error"), bIsError);
+	// Error must list the valid options so the caller can self-correct.
+	TestTrue(TEXT("bad direction error lists valid directions (one_way or two_way)"),
+		BadDirErr.Contains(TEXT("one_way"), ESearchCase::IgnoreCase) ||
+		BadDirErr.Contains(TEXT("two_way"), ESearchCase::IgnoreCase));
+
+	// Step 8 (structural) — validate-first design: the three failed add_view_binding calls above
+	// must NOT have created any binding rows (no dangling blank bindings).
+	// We verify via the MVVM editor subsystem directly.
+	{
+		UMVVMEditorSubsystem* Sub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+		if (Sub)
+		{
+			const UMVVMBlueprintView* View = Sub->GetView(WBP);
+			const int32 BindingCount = View ? View->GetNumBindings() : 0;
+			TestEqual(TEXT("no dangling binding rows after failed add_view_binding calls (validate-first)"),
+				BindingCount, 0);
+		}
 	}
 
 	return true;
