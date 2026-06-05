@@ -481,6 +481,8 @@ namespace
 			}
 			// Ensure the widget is exposed as a Blueprint variable so the skeleton class gets
 			// an FObjectProperty for it — required for the bound-event node's CompProp lookup.
+			// Intentional: committed as its own transaction; bIsVariable=true is safe (and usually
+			// desired) to keep even if the node spawn below fails — no rollback on downstream error.
 			if (!Widget->bIsVariable)
 			{
 				FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "MakeWidgetVariable", "MCP: Make Widget Variable"));
