@@ -580,7 +580,9 @@ namespace
 			FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId);
 			if (!BindingPtr)
 			{
-				// Should never happen, but guard defensively.
+				// Should never happen, but guard defensively. A null lookup means the row with
+				// this id no longer exists (the engine removed it internally) — there is no
+				// dangling binding left to clean up (gate-review note).
 				return FAgentMcpToolResult::Error(TEXT("Binding was lost after SetSourcePath call. This is an engine-internal error."));
 			}
 			Sub->SetDestinationPathForBinding(WBP, *BindingPtr, DstPath, /*bAllowEventConversion=*/false);
