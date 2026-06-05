@@ -25,13 +25,16 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterEditorInfoTools();
 	AgentMcp::Tools::RegisterAssetQueryTools();
 	AgentMcp::Tools::RegisterNodeGraphTools();
+	AgentMcp::Tools::RegisterGraphPinAndLayoutTools();
 	AgentMcp::Tools::RegisterBlueprintTools();
 	AgentMcp::Tools::RegisterEditorSessionTools();
 	AgentMcp::Tools::RegisterActorTools();
 	AgentMcp::Tools::RegisterInputTools();
 	AgentMcp::Tools::RegisterVariableComponentTools();
 	AgentMcp::Tools::RegisterWidgetTools();
+	AgentMcp::Tools::RegisterWidgetEditTools();
 	AgentMcp::Tools::RegisterMvvmTools();
+	AgentMcp::Tools::RegisterMvvmBindingTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 
