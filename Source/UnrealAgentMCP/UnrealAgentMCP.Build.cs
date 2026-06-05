@@ -31,6 +31,7 @@ public class UnrealAgentMCP : ModuleRules
 			"ModelViewViewModelBlueprint",
 			"ModelViewViewModel",
 			"FieldNotification",
+			"MovieScene",
 		});
 	}
 }

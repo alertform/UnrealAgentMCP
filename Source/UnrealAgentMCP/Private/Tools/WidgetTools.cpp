@@ -26,6 +26,7 @@
 #include "UObject/UObjectGlobals.h"
 #include "WidgetBlueprint.h"
 #include "Animation/WidgetAnimation.h"
+#include "MovieScene.h"
 #include "Editor.h"
 #include "MVVMBlueprintView.h"
 #include "MVVMBlueprintViewBinding.h"
@@ -769,7 +770,7 @@ namespace
 		if (Existing == Widget)
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("Widget '%s' already has that name. already occupied."),
+				TEXT("Widget '%s' already has that name."),
 				*NewName));
 		}
 		// Also check non-widget subobjects (slots share the same outer).
@@ -777,7 +778,7 @@ namespace
 		if (SubObj && SubObj != Widget)
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("Name '%s' is already taken by another subobject. already occupied."),
+				TEXT("Name '%s' is already taken by another subobject."),
 				*NewName));
 		}
 
@@ -820,7 +821,15 @@ namespace
 
 		const FString NewNameStr = NewName;
 		Widget->SetDisplayLabel(NewNameStr);
-		Widget->Rename(*NewNameStr);
+		if (!Widget->Rename(*NewNameStr))
+		{
+			// UObject-level failure the pre-checks missed (reserved/auto-suffixed names).
+			// Cancel so the SetDisplayLabel above rolls back too (T3 review finding).
+			Transaction.Cancel();
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("UObject::Rename failed for widget '%s' -> '%s'. The name may be reserved."),
+				*OldName, *NewName));
+		}
 
 		// Update FDelegateEditorBinding references (property bindings in the editor).
 		for (FDelegateEditorBinding& Binding : WBP->Bindings)
@@ -831,7 +840,10 @@ namespace
 			}
 		}
 
-		// Update widget animation bindings.
+		// Update widget animation bindings — including the MovieScene possessable display
+		// name, mirroring FWidgetBlueprintEditorUtils::RenameWidget (T3 review finding:
+		// without Modify+SetName the Sequencer track header keeps the stale name and the
+		// possessable rename is missing from the undo record).
 		for (UWidgetAnimation* Anim : WBP->Animations)
 		{
 			if (!Anim)
@@ -843,6 +855,17 @@ namespace
 				if (AnimBinding.WidgetName == OldFName)
 				{
 					AnimBinding.WidgetName = NewFName;
+					if (Anim->MovieScene)
+					{
+						Anim->MovieScene->Modify();
+						if (AnimBinding.SlotWidgetName == NAME_None)
+						{
+							if (FMovieScenePossessable* Possessable = Anim->MovieScene->FindPossessable(AnimBinding.AnimationGuid))
+							{
+								Possessable->SetName(NewFName.ToString());
+							}
+						}
+					}
 				}
 			}
 		}
