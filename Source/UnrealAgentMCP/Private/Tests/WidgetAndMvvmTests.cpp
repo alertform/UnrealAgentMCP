@@ -739,4 +739,181 @@ bool FMvvmBindingLifecycleTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// FRenameWidgetTest
+// Verifies rename_widget: happy path, MVVM sync, not-found, collision, charset.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRenameWidgetTest,
+	"UnrealAgentMCP.P6.RenameWidget",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FRenameWidgetTest::RunTest(const FString& Parameters)
+{
+	// ── Setup: VerticalBox root "RootBox" + TextBlock child "OldName" ───────
+	UWidgetBlueprint* WBP = AgentMcpTestUtils::MakeTransientWidgetBlueprint(TEXT("WBP_McpRenameWidgetTest"));
+	if (!TestNotNull(TEXT("transient WBP created"), WBP))
+	{
+		return true;
+	}
+	const FString Path = WBP->GetPathName();
+	bool bIsError = false;
+
+	// Step 1a — add VerticalBox as root.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"VerticalBox\",\"widget_name\":\"RootBox\",\"as_root\":true}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add VerticalBox RootBox succeeds"), bIsError);
+
+	// Step 1b — add TextBlock "OldName" as child of RootBox.
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"TextBlock\",\"widget_name\":\"OldName\",\"parent_name\":\"RootBox\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add TextBlock OldName succeeds"), bIsError);
+
+	// Step 2 — rename_widget OldName → NewName: {renamed:true, name:"NewName"}.
+	const TSharedPtr<FJsonObject> RenameResult = AgentMcpTestUtils::CallTool(*this, TEXT("rename_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"OldName\",\"new_name\":\"NewName\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("rename_widget OldName→NewName succeeds"), bIsError);
+	if (TestNotNull(TEXT("rename result parses"), RenameResult.Get()))
+	{
+		TestTrue(TEXT("renamed:true"), RenameResult->GetBoolField(TEXT("renamed")));
+		TestEqual(TEXT("name is NewName"), RenameResult->GetStringField(TEXT("name")), FString(TEXT("NewName")));
+	}
+
+	// Step 3 — list_widgets: 2 widgets total; one named "NewName", none named "OldName".
+	const TSharedPtr<FJsonObject> Listed = AgentMcpTestUtils::CallTool(*this, TEXT("list_widgets"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+	TestFalse(TEXT("list_widgets succeeds after rename"), bIsError);
+	if (TestNotNull(TEXT("list_widgets parses"), Listed.Get()))
+	{
+		TestEqual(TEXT("count == 2 after rename"), (int32)Listed->GetNumberField(TEXT("count")), 2);
+		bool bFoundNew = false;
+		bool bFoundOld = false;
+		for (const TSharedPtr<FJsonValue>& Entry : Listed->GetArrayField(TEXT("widgets")))
+		{
+			const TSharedPtr<FJsonObject> W = Entry->AsObject();
+			if (!W.IsValid()) { continue; }
+			const FString WName = W->GetStringField(TEXT("name"));
+			if (WName == TEXT("NewName")) { bFoundNew = true; }
+			if (WName == TEXT("OldName")) { bFoundOld = true; }
+		}
+		TestTrue(TEXT("NewName present in list"), bFoundNew);
+		TestFalse(TEXT("OldName absent from list"), bFoundOld);
+	}
+
+	// Step 4 — rename_widget on "NoSuchWidget" → error contains "list_widgets".
+	const FString NotFoundErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("rename_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NoSuchWidget\",\"new_name\":\"Anything\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("missing widget is error"), bIsError);
+	TestTrue(TEXT("missing widget error mentions list_widgets"),
+		NotFoundErr.Contains(TEXT("list_widgets"), ESearchCase::IgnoreCase));
+
+	// Step 5 — collision: add Button "TakenName" then try renaming NewName→TakenName → error "already".
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"Button\",\"widget_name\":\"TakenName\",\"parent_name\":\"RootBox\"}"), *Path),
+		bIsError);
+	TestFalse(TEXT("add Button TakenName succeeds"), bIsError);
+
+	const FString CollisionErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("rename_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NewName\",\"new_name\":\"TakenName\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("collision rename is error"), bIsError);
+	TestTrue(TEXT("collision error mentions 'already'"),
+		CollisionErr.Contains(TEXT("already"), ESearchCase::IgnoreCase));
+
+	// Step 6 — invalid charset: rename NewName→"Bad Name/Chars." → error mentioning allowed chars.
+	const FString CharsetErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("rename_widget"),
+		FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NewName\",\"new_name\":\"Bad Name\"}"), *Path),
+		bIsError);
+	TestTrue(TEXT("invalid charset is error"), bIsError);
+	TestTrue(TEXT("charset error mentions allowed characters"),
+		CharsetErr.Contains(TEXT("A-Za-z0-9"), ESearchCase::IgnoreCase) ||
+		CharsetErr.Contains(TEXT("invalid"), ESearchCase::IgnoreCase));
+
+	// Step 7 — compile_blueprint (before MVVM sync so no dangling binding row interferes).
+	// The WBP at this point has RootBox (VerticalBox), NewName (TextBlock), TakenName (Button).
+	{
+		const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+		TestFalse(TEXT("compile_blueprint succeeds"), bIsError);
+		if (TestNotNull(TEXT("compile payload"), Compiled.Get()))
+		{
+			TestEqual(TEXT("compile status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
+			TestEqual(TEXT("compile num_errors 0"), (int32)Compiled->GetNumberField(TEXT("num_errors")), 0);
+		}
+	}
+
+	// Step 8 — MVVM sync: add viewmodel, create a binding row pointing at "NewName", rename → synced.
+	// The binding is an intentionally incomplete row (no source path) — used only to test destination-path
+	// sync. It is removed immediately after verification to avoid poisoning future state.
+	{
+		// Add viewmodel.
+		AgentMcpTestUtils::CallTool(*this, TEXT("add_viewmodel"),
+			FString::Printf(
+				TEXT("{\"blueprint_path\":\"%s\",\"viewmodel_class\":\"/Script/ModelViewViewModel.MVVMViewModelBase\",\"name\":\"TestVM\",\"creation_type\":\"manual\"}"),
+				*Path),
+			bIsError);
+		TestFalse(TEXT("add_viewmodel for MVVM sync succeeds"), bIsError);
+
+		// Create a binding row directly via engine subsystem with DestinationPath.WidgetName == "NewName".
+		UMVVMEditorSubsystem* Sub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+		if (TestNotNull(TEXT("MVVM subsystem available"), Sub))
+		{
+			Sub->RequestView(WBP);
+			FMVVMBlueprintViewBinding& NewBinding = Sub->AddBinding(WBP);
+			const FGuid BindId = NewBinding.BindingId;
+
+			// Build a destination path pointing at "NewName".
+			FMVVMBlueprintPropertyPath DestPath;
+			DestPath.SetWidgetName(FName(TEXT("NewName")));
+			// Re-fetch after potential realloc, then write the path.
+			FMVVMBlueprintViewBinding* BindingPtr = nullptr;
+			UMVVMBlueprintView* View = Sub->GetView(WBP);
+			if (View) { BindingPtr = View->GetBinding(BindId); }
+			if (TestNotNull(TEXT("binding row re-fetched"), BindingPtr))
+			{
+				Sub->SetDestinationPathForBinding(WBP, *BindingPtr, DestPath, /*bAllowEventConversion=*/false);
+			}
+
+			// rename_widget NewName → "Synced".
+			// NOTE: this triggers MarkBlueprintAsStructurallyModified which compiles the WBP.
+			// The binding has no source path, so the compile will emit a LogBlueprint Error.
+			// Pre-register it as an expected error so the framework doesn't count it as a failure.
+			AddExpectedErrorPlain(TEXT("A source path is required, but not set"));
+			const TSharedPtr<FJsonObject> SyncResult = AgentMcpTestUtils::CallTool(*this, TEXT("rename_widget"),
+				FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"NewName\",\"new_name\":\"Synced\"}"), *Path),
+				bIsError);
+			TestFalse(TEXT("rename NewName→Synced succeeds"), bIsError);
+			if (TestNotNull(TEXT("sync result parses"), SyncResult.Get()))
+			{
+				TestEqual(TEXT("mvvm_bindings_updated == 1"),
+					(int32)SyncResult->GetNumberField(TEXT("mvvm_bindings_updated")), 1);
+			}
+
+			// Verify the binding's DestinationPath.GetWidgetName() was updated.
+			View = Sub->GetView(WBP);
+			if (View)
+			{
+				const FMVVMBlueprintViewBinding* FinalBinding = View->GetBinding(BindId);
+				if (TestNotNull(TEXT("binding row still exists after rename"), FinalBinding))
+				{
+					TestEqual(TEXT("binding DestinationPath.WidgetName updated to 'Synced'"),
+						FinalBinding->DestinationPath.GetWidgetName(),
+						FName(TEXT("Synced")));
+				}
+			}
+
+			// Remove the incomplete binding to clean up.
+			AgentMcpTestUtils::CallTool(*this, TEXT("remove_view_binding"),
+				FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"binding_id\":\"%s\"}"),
+					*Path, *BindId.ToString()),
+				bIsError);
+			TestFalse(TEXT("remove incomplete binding ok"), bIsError);
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

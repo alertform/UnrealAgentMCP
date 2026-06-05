@@ -25,6 +25,12 @@
 #include "Tools/PropertyBridge.h"
 #include "UObject/UObjectGlobals.h"
 #include "WidgetBlueprint.h"
+#include "Animation/WidgetAnimation.h"
+#include "Editor.h"
+#include "MVVMBlueprintView.h"
+#include "MVVMBlueprintViewBinding.h"
+#include "MVVMEditorSubsystem.h"
+#include "MVVMPropertyPath.h"
 
 namespace
 {
@@ -666,6 +672,242 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
+	// ─────────────────────────────────────────────────────────────────────
+	// rename_widget handler
+	// ─────────────────────────────────────────────────────────────────────
+
+	/**
+	 * Validates a proposed widget name: [A-Za-z0-9_], non-empty, ≤100 chars.
+	 * Returns true when valid. SlugStringForValidName is not exported — manual
+	 * validation is used (same char-set as the engine uses for FNames that become
+	 * BP variable names).
+	 */
+	static bool IsValidWidgetName(const FString& Name, FString& OutError)
+	{
+		if (Name.IsEmpty())
+		{
+			OutError = TEXT("new_name must not be empty.");
+			return false;
+		}
+		if (Name.Len() > 100)
+		{
+			OutError = TEXT("new_name exceeds 100 characters.");
+			return false;
+		}
+		for (TCHAR Ch : Name)
+		{
+			if (!FChar::IsAlnum(Ch) && Ch != TEXT('_'))
+			{
+				OutError = FString::Printf(
+					TEXT("new_name '%s' contains invalid character '%c'. Allowed: [A-Za-z0-9_]."),
+					*Name, Ch);
+				return false;
+			}
+		}
+		return true;
+	}
+
+	FAgentMcpToolResult HandleRenameWidget(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args.IsValid())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing arguments."));
+		}
+
+		FString BlueprintPath;
+		if (!Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString OldName;
+		if (!Args->TryGetStringField(TEXT("widget_name"), OldName) || OldName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'widget_name'."));
+		}
+		FString NewName;
+		if (!Args->TryGetStringField(TEXT("new_name"), NewName) || NewName.IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'new_name'."));
+		}
+
+		// ── Validate new_name charset ────────────────────────────────────────
+		FString ValidationError;
+		if (!IsValidWidgetName(NewName, ValidationError))
+		{
+			return FAgentMcpToolResult::Error(ValidationError);
+		}
+
+		// ── Resolve blueprint ────────────────────────────────────────────────
+		FString Error;
+		UWidgetBlueprint* WBP = ResolveWidgetBlueprint(BlueprintPath, Error);
+		if (!WBP)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+
+		UWidgetTree* Tree = WBP->WidgetTree;
+		if (!Tree)
+		{
+			return FAgentMcpToolResult::Error(TEXT("WidgetBlueprint has no WidgetTree."));
+		}
+
+		// ── Find old widget ───────────────────────────────────────────────────
+		const FName OldFName(*OldName);
+		UWidget* Widget = Tree->FindWidget(OldFName);
+		if (!Widget)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Widget '%s' not found. Use list_widgets to enumerate available widgets."),
+				*OldName));
+		}
+
+		// ── Collision checks ─────────────────────────────────────────────────
+		const FName NewFName(*NewName);
+
+		// Check via WidgetTree (widgets).
+		UWidget* Existing = Tree->FindWidget(NewFName);
+		if (Existing && Existing != Widget)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("A widget named '%s' already exists in the tree. Use list_widgets to see names."),
+				*NewName));
+		}
+		// Self-collision: renaming a widget to its own name is a no-op collision.
+		if (Existing == Widget)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Widget '%s' already has that name. already occupied."),
+				*NewName));
+		}
+		// Also check non-widget subobjects (slots share the same outer).
+		UObject* SubObj = StaticFindObject(UObject::StaticClass(), Tree, *NewName);
+		if (SubObj && SubObj != Widget)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Name '%s' is already taken by another subobject. already occupied."),
+				*NewName));
+		}
+
+		// ── MVVM binding scan (before transaction) ───────────────────────────
+		// Collect ids of bindings whose DestinationPath.GetWidgetName() == OldFName.
+		// Skip bindings that have any conversion object — rewiring conversion pins is out of scope.
+		TArray<FGuid> BindingsToSync;
+		TArray<FGuid> BindingsSkipped;
+
+		UMVVMEditorSubsystem* MvvmSub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+		UMVVMBlueprintView* View = MvvmSub ? MvvmSub->GetView(WBP) : nullptr;
+		if (View)
+		{
+			for (const FMVVMBlueprintViewBinding& Binding : View->GetBindings())
+			{
+				if (Binding.DestinationPath.GetWidgetName() == OldFName)
+				{
+					const bool bHasConversion =
+						(Binding.Conversion.SourceToDestinationConversion != nullptr) ||
+						(Binding.Conversion.DestinationToSourceConversion != nullptr);
+					if (bHasConversion)
+					{
+						BindingsSkipped.Add(Binding.BindingId);
+					}
+					else
+					{
+						BindingsToSync.Add(Binding.BindingId);
+					}
+				}
+			}
+		}
+
+		// ── Transaction: rename widget THEN sync MVVM paths ──────────────────
+		// NOTE: Renaming AWAY from a BindWidget-matched name (e.g. HostButton) will
+		// silently unbind the C++ UPROPERTY pointer at next compile. The compiler warning
+		// will surface this — this rename is intentional.
+		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "RenameWidget", "MCP: Rename Widget"));
+		WBP->Modify();
+		Widget->Modify();
+
+		const FString NewNameStr = NewName;
+		Widget->SetDisplayLabel(NewNameStr);
+		Widget->Rename(*NewNameStr);
+
+		// Update FDelegateEditorBinding references (property bindings in the editor).
+		for (FDelegateEditorBinding& Binding : WBP->Bindings)
+		{
+			if (Binding.ObjectName == OldName)
+			{
+				Binding.ObjectName = NewNameStr;
+			}
+		}
+
+		// Update widget animation bindings.
+		for (UWidgetAnimation* Anim : WBP->Animations)
+		{
+			if (!Anim)
+			{
+				continue;
+			}
+			for (FWidgetAnimationBinding& AnimBinding : Anim->AnimationBindings)
+			{
+				if (AnimBinding.WidgetName == OldFName)
+				{
+					AnimBinding.WidgetName = NewFName;
+				}
+			}
+		}
+
+		// Update navigation bindings.
+		Tree->ForEachWidget([OldFName, NewFName](UWidget* W)
+		{
+			if (W && W->Navigation)
+			{
+				W->Navigation->SetFlags(RF_Transactional);
+				W->Navigation->Modify();
+				W->Navigation->TryToRenameBinding(OldFName, NewFName);
+			}
+		});
+
+		// Update variable references in all graphs.
+		FBlueprintEditorUtils::ReplaceVariableReferences(WBP, OldFName, NewFName);
+
+		// Mark structural modification.
+		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+
+		// ── MVVM path sync (still inside the transaction) ────────────────────
+		int32 BindingsUpdated = 0;
+		if (MvvmSub && View && BindingsToSync.Num() > 0)
+		{
+			for (const FGuid& Id : BindingsToSync)
+			{
+				// Re-fetch after potential TArray reallocation from MarkBlueprintAsStructurallyModified.
+				FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(Id);
+				if (!BindingPtr)
+				{
+					continue;
+				}
+				// Copy the existing path, swap the widget name, write back via subsystem.
+				FMVVMBlueprintPropertyPath NewPath = BindingPtr->DestinationPath;
+				NewPath.SetWidgetName(NewFName);
+				MvvmSub->SetDestinationPathForBinding(WBP, *BindingPtr, NewPath, /*bAllowEventConversion=*/false);
+				++BindingsUpdated;
+			}
+		}
+
+		// ── Build result ──────────────────────────────────────────────────────
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("renamed"), true);
+		Result->SetStringField(TEXT("name"), NewName);
+		Result->SetNumberField(TEXT("mvvm_bindings_updated"), BindingsUpdated);
+		if (BindingsSkipped.Num() > 0)
+		{
+			TArray<TSharedPtr<FJsonValue>> SkippedArr;
+			for (const FGuid& Id : BindingsSkipped)
+			{
+				SkippedArr.Add(MakeShared<FJsonValueString>(Id.ToString()));
+			}
+			Result->SetArrayField(TEXT("mvvm_bindings_skipped_conversions"), SkippedArr);
+		}
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 } // anonymous namespace
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -814,6 +1056,54 @@ void AgentMcp::Tools::RegisterWidgetTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddComponentEvent);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// rename_widget
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("rename_widget");
+		Def.Description = TEXT(
+			"Renames a widget inside a WidgetBlueprint's tree and syncs MVVM binding destination paths. "
+			"Args: blueprint_path (req), widget_name (req — current name), new_name (req). "
+			"new_name must match [A-Za-z0-9_], ≤100 chars. "
+			"WARNING: renaming a BindWidget-matched name (e.g. HostButton) will unbind the C++ UPROPERTY pointer at next compile — "
+			"the compiler warning will surface this. "
+			"MVVM bindings that have conversion functions are NOT rewritten (see mvvm_bindings_skipped_conversions in the result); "
+			"remove and re-add those via remove_view_binding/add_view_binding. "
+			"Returns {renamed:true, name:<new>, mvvm_bindings_updated:N, mvvm_bindings_skipped_conversions:[ids...]} "
+			"(skipped array omitted when empty). "
+			"Errors: widget not found ('list_widgets' hint); new_name invalid; new_name 'already' taken; not a WidgetBlueprint.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> BpPath = MakeShared<FJsonObject>();
+			BpPath->SetStringField(TEXT("type"), TEXT("string"));
+			BpPath->SetStringField(TEXT("description"), TEXT("Absolute asset path to the WidgetBlueprint, e.g. /Game/UI/WBP_MainMenu"));
+			Properties->SetObjectField(TEXT("blueprint_path"), BpPath);
+
+			TSharedRef<FJsonObject> WName = MakeShared<FJsonObject>();
+			WName->SetStringField(TEXT("type"), TEXT("string"));
+			WName->SetStringField(TEXT("description"), TEXT("Current name of the widget to rename (use list_widgets to discover names)."));
+			Properties->SetObjectField(TEXT("widget_name"), WName);
+
+			TSharedRef<FJsonObject> NName = MakeShared<FJsonObject>();
+			NName->SetStringField(TEXT("type"), TEXT("string"));
+			NName->SetStringField(TEXT("description"), TEXT("New name for the widget. Must match [A-Za-z0-9_] and be ≤100 characters."));
+			Properties->SetObjectField(TEXT("new_name"), NName);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("widget_name")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("new_name")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleRenameWidget);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 
