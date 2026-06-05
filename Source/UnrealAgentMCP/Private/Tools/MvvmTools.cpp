@@ -153,9 +153,27 @@ namespace
 			OutMode = EMVVMBindingMode::OneTimeToDestination;
 			return true;
 		}
+		if (Lower == TEXT("one_way_to_source") || Lower == TEXT("onewaytosource"))
+		{
+			OutMode = EMVVMBindingMode::OneWayToSource;
+			return true;
+		}
 		OutError = FString::Printf(
-			TEXT("Unknown direction '%s'. Valid values: one_way (viewmodel→widget), two_way, one_time."), *Token);
+			TEXT("Unknown direction '%s'. Valid values: one_way (viewmodel→widget), two_way, one_time, one_way_to_source (widget→viewmodel)."), *Token);
 		return false;
+	}
+
+	/** First input (non-return, non-out) parameter name of a function — the conversion data pin. */
+	FName FirstInputParamName(const UFunction* Function)
+	{
+		for (TFieldIterator<FProperty> It(Function); It; ++It)
+		{
+			if (It->HasAnyPropertyFlags(CPF_Parm) && !It->HasAnyPropertyFlags(CPF_ReturnParm | CPF_OutParm))
+			{
+				return It->GetFName();
+			}
+		}
+		return NAME_None;
 	}
 
 	/** Parse creation_type token. */
@@ -483,22 +501,33 @@ namespace
 		const UFunction* ConvDstToSrc = nullptr;
 		if (VMField && WidgetField && !VMField->SameType(WidgetField))
 		{
-			ConvSrcToDst = FindConversionFunction(Sub, WBP, VMField, WidgetField);
-			if (!ConvSrcToDst)
+			// Engine rule (verified live): two-way bindings cannot use conversion functions.
+			if (BindingMode == EMVVMBindingMode::TwoWay)
 			{
 				return FAgentMcpToolResult::Error(FString::Printf(
-					TEXT("Types differ ('%s' is %s, '%s' is %s) and no conversion function was found for %s -> %s."),
-					*VMPropName, *VMField->GetCPPType(), *WidgetPropName, *WidgetField->GetCPPType(),
-					*VMField->GetCPPType(), *WidgetField->GetCPPType()));
+					TEXT("'%s' (%s) and '%s' (%s) differ in type, and the engine forbids conversion functions on two_way bindings. "
+						"Create TWO bindings instead: direction=one_way (VM→widget) plus direction=one_way_to_source (widget→VM)."),
+					*VMPropName, *VMField->GetCPPType(), *WidgetPropName, *WidgetField->GetCPPType()));
 			}
-			if (BindingMode == EMVVMBindingMode::TwoWay)
+			if (BindingMode == EMVVMBindingMode::OneWayToSource)
 			{
 				ConvDstToSrc = FindConversionFunction(Sub, WBP, WidgetField, VMField);
 				if (!ConvDstToSrc)
 				{
 					return FAgentMcpToolResult::Error(FString::Printf(
-						TEXT("two_way binding needs BOTH conversions; none found for %s -> %s (the reverse direction). Use one_way, or add a conversion function."),
+						TEXT("Types differ and no conversion function was found for %s -> %s (widget → viewmodel)."),
 						*WidgetField->GetCPPType(), *VMField->GetCPPType()));
+				}
+			}
+			else // OneWayToDestination / OneTimeToDestination
+			{
+				ConvSrcToDst = FindConversionFunction(Sub, WBP, VMField, WidgetField);
+				if (!ConvSrcToDst)
+				{
+					return FAgentMcpToolResult::Error(FString::Printf(
+						TEXT("Types differ ('%s' is %s, '%s' is %s) and no conversion function was found for %s -> %s."),
+						*VMPropName, *VMField->GetCPPType(), *WidgetPropName, *WidgetField->GetCPPType(),
+						*VMField->GetCPPType(), *WidgetField->GetCPPType()));
 				}
 			}
 		}
@@ -512,21 +541,39 @@ namespace
 		// internally) could invalidate the reference. We capture the ID so we can re-fetch later.
 		const FGuid BindingId = Binding.BindingId;
 
-		// ── Build source path (viewmodel → widget direction) ────────────────
+		// ── Build paths (kept in scope: conversion pin wiring re-uses them) ─
+		FMVVMBlueprintPropertyPath SrcPath;
+		SrcPath.SetViewModelId(VMId);
+		if (VMField)
 		{
-			FMVVMBlueprintPropertyPath Src;
-			Src.SetViewModelId(VMId);
-			if (VMField)
-			{
-				Src.SetPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(VMField));
-			}
-			else
-			{
-				Src.SetPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(VMFunc));
-			}
-			// SetSourcePathForBinding opens its own FScopedTransaction internally.
-			Sub->SetSourcePathForBinding(WBP, Binding, Src);
+			SrcPath.SetPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(VMField));
 		}
+		else
+		{
+			SrcPath.SetPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(VMFunc));
+		}
+
+		FMVVMBlueprintPropertyPath DstPath;
+		DstPath.ResetPropertyPath();
+		if (WidgetField)
+		{
+			DstPath.AppendPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(WidgetField));
+		}
+		else if (WidgetFunc)
+		{
+			DstPath.AppendPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(WidgetFunc));
+		}
+		if (bIsSelf)
+		{
+			DstPath.SetSelfContext();
+		}
+		else
+		{
+			DstPath.SetWidgetName(WidgetFName);
+		}
+
+		// SetSourcePathForBinding opens its own FScopedTransaction internally.
+		Sub->SetSourcePathForBinding(WBP, Binding, SrcPath);
 
 		// Re-fetch binding by ID — the TArray may have been re-allocated by SetSourcePathForBinding.
 		{
@@ -536,29 +583,7 @@ namespace
 				// Should never happen, but guard defensively.
 				return FAgentMcpToolResult::Error(TEXT("Binding was lost after SetSourcePath call. This is an engine-internal error."));
 			}
-
-			// ── Build destination path (widget side) ────────────────────────
-			FMVVMBlueprintPropertyPath Dst;
-			Dst.ResetPropertyPath();
-			if (WidgetField)
-			{
-				Dst.AppendPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(WidgetField));
-			}
-			else if (WidgetFunc)
-			{
-				Dst.AppendPropertyPath(WBP, UE::MVVM::FMVVMConstFieldVariant(WidgetFunc));
-			}
-
-			if (bIsSelf)
-			{
-				Dst.SetSelfContext();
-			}
-			else
-			{
-				Dst.SetWidgetName(WidgetFName);
-			}
-
-			Sub->SetDestinationPathForBinding(WBP, *BindingPtr, Dst, /*bAllowEventConversion=*/false);
+			Sub->SetDestinationPathForBinding(WBP, *BindingPtr, DstPath, /*bAllowEventConversion=*/false);
 		}
 
 		// Re-fetch again after destination path set.
@@ -571,21 +596,60 @@ namespace
 			}
 		}
 
-		// ── Apply pre-resolved conversion functions ─────────────────────────
-		if (ConvSrcToDst)
+		// ── Apply pre-resolved conversion function + wire its data pin ──────
+		// Engine behavior (MVVMEditorSubsystem.cpp:416-468): SetXxxConversionFunction first
+		// VALIDATES against the binding's current paths (so it must run AFTER both paths are
+		// set), then CLEARS the corresponding path and creates a wrapper graph. The data path
+		// must then be re-supplied INTO the wrapper's first argument pin — without that, the
+		// argument stays a literal default and the binding compiles against a constant.
+		if (ConvSrcToDst || ConvDstToSrc)
 		{
-			if (FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId))
+			const UFunction* ConvFn = ConvSrcToDst ? ConvSrcToDst : ConvDstToSrc;
+			const bool bSourceToDestination = ConvSrcToDst != nullptr;
+			FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId);
+			if (BindingPtr)
 			{
-				Sub->SetSourceToDestinationConversionFunction(WBP, *BindingPtr,
-					FMVVMBlueprintFunctionReference(WBP, ConvSrcToDst));
-			}
-		}
-		if (ConvDstToSrc)
-		{
-			if (FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId))
-			{
-				Sub->SetDestinationToSourceConversionFunction(WBP, *BindingPtr,
-					FMVVMBlueprintFunctionReference(WBP, ConvDstToSrc));
+				if (bSourceToDestination)
+				{
+					Sub->SetSourceToDestinationConversionFunction(WBP, *BindingPtr,
+						FMVVMBlueprintFunctionReference(WBP, ConvFn));
+				}
+				else
+				{
+					Sub->SetDestinationToSourceConversionFunction(WBP, *BindingPtr,
+						FMVVMBlueprintFunctionReference(WBP, ConvFn));
+				}
+
+				BindingPtr = View->GetBinding(BindingId);
+				const bool bConversionApplied = BindingPtr &&
+					(bSourceToDestination
+						? BindingPtr->Conversion.SourceToDestinationConversion != nullptr
+						: BindingPtr->Conversion.DestinationToSourceConversion != nullptr);
+				if (!bConversionApplied)
+				{
+					// The subsystem silently nulls invalid conversions — surface it and clean up.
+					if (BindingPtr) { View->RemoveBinding(BindingPtr); }
+					return FAgentMcpToolResult::Error(FString::Printf(
+						TEXT("Engine rejected conversion function '%s' for this binding (incompatible with the resolved paths). Binding removed."),
+						*ConvFn->GetName()));
+				}
+
+				// Wire the data path into the conversion's first input parameter pin.
+				const FName ParamName = FirstInputParamName(ConvFn);
+				if (ParamName.IsNone())
+				{
+					View->RemoveBinding(BindingPtr);
+					return FAgentMcpToolResult::Error(FString::Printf(
+						TEXT("Conversion function '%s' has no input parameter to wire. Binding removed."), *ConvFn->GetName()));
+				}
+				TArray<FName> PinNames;
+				PinNames.Add(ParamName);
+				// For VM→widget conversions the data input is the VIEWMODEL path; for
+				// widget→VM conversions it is the WIDGET path.
+				Sub->SetPathForConversionFunctionArgument(WBP, *BindingPtr,
+					FMVVMBlueprintPinId(MoveTemp(PinNames)),
+					bSourceToDestination ? SrcPath : DstPath,
+					bSourceToDestination);
 			}
 		}
 
@@ -761,8 +825,10 @@ void AgentMcp::Tools::RegisterMvvmTools()
 			"IMPORTANT: viewmodel_property must be a FieldNotify-enabled property — the engine silently no-ops on invalid paths; this tool surfaces that as an explicit error. "
 			"Args: blueprint_path (req), widget_name (req — use list_widgets), widget_property (req — e.g. 'Text'), "
 			"viewmodel_name (req — name used in add_viewmodel), viewmodel_property (req — property name on the VM class), "
-			"direction (opt: one_way (default, VM→widget), two_way, one_time). "
-			"Returns {bound, binding_id, compile:{status, num_errors, num_warnings}}.");
+			"direction (opt: one_way (default, VM→widget), two_way, one_time, one_way_to_source (widget→VM)). "
+			"Type-mismatched property pairs get a conversion function auto-discovered and wired (e.g. int↔float, bool→ESlateVisibility). "
+			"ENGINE RULE: two_way cannot use conversions — for mismatched two-way data, create one_way + one_way_to_source as two bindings. "
+			"Returns {bound, binding_id, conversion_source_to_dest?, conversion_dest_to_source?, compile:{status, num_errors, num_warnings}}.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
