@@ -5,6 +5,7 @@
 #include "AgentMcpSettings.h"
 #include "Animation/AnimMontage.h"
 #include "Animation/AnimSequence.h"
+#include "Animation/Skeleton.h"
 #include "Core/AgentMcpTier.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
@@ -367,6 +368,121 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 				NonGeErr.Contains(TEXT("GameplayEffect"), ESearchCase::IgnoreCase));
 		}
 	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// FAddCompatibleSkeletonTest
+// Creates two transient USkeleton objects, calls add_compatible_skeleton,
+// asserts idempotency and error paths, then cleans up.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAddCompatibleSkeletonTest,
+	"UnrealAgentMCP.P7.AddCompatibleSkeleton",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FAddCompatibleSkeletonTest::RunTest(const FString& Parameters)
+{
+	// -----------------------------------------------------------------------
+	// Setup: duplicate SK_Mannequin into two independent transient skeletons
+	// so this test never touches the committed project skeleton.
+	// -----------------------------------------------------------------------
+	constexpr const TCHAR* KSourceSkeletonPath =
+		TEXT("/Game/Characters/Mannequins/Meshes/SK_Mannequin");
+
+	// Normalised object path used by LoadObject.
+	const FString SourceObjPath =
+		FString(KSourceSkeletonPath) + TEXT(".SK_Mannequin");
+
+	USkeleton* SourceSkel = LoadObject<USkeleton>(nullptr, *SourceObjPath);
+	if (!TestNotNull(TEXT("Source skeleton SK_Mannequin loads"), SourceSkel))
+	{
+		return false;
+	}
+
+	// Create two transient (in-memory only) USkeleton copies.
+	// NewObject with RROOTSET keeps them alive for the test duration.
+	UPackage* TransientPkg = GetTransientPackage();
+	USkeleton* SkelA = DuplicateObject<USkeleton>(SourceSkel, TransientPkg, TEXT("TestSkelA_CompatTest"));
+	USkeleton* SkelB = DuplicateObject<USkeleton>(SourceSkel, TransientPkg, TEXT("TestSkelB_CompatTest"));
+
+	if (!TestNotNull(TEXT("SkelA created"), SkelA) ||
+		!TestNotNull(TEXT("SkelB created"), SkelB))
+	{
+		return false;
+	}
+
+	// Give them stable package paths so the tool can find them via FindObject.
+	// (DuplicateObject puts them in TransientPackage — FindObject by full path works.)
+	const FString SkelAPath = SkelA->GetPathName();
+	const FString SkelBPath = SkelB->GetPathName();
+
+	bool bIsError = false;
+
+	// -----------------------------------------------------------------------
+	// Step 1 — happy path: add SkelB as compatible with SkelA.
+	// -----------------------------------------------------------------------
+	const TSharedPtr<FJsonObject> AddResult = AgentMcpTestUtils::CallTool(*this,
+		TEXT("add_compatible_skeleton"),
+		FString::Printf(
+			TEXT("{\"skeleton_path\":\"%s\",\"compatible_skeleton_path\":\"%s\"}"),
+			*SkelAPath, *SkelBPath),
+		bIsError);
+
+	TestFalse(TEXT("add_compatible_skeleton succeeds"), bIsError);
+	if (TestNotNull(TEXT("add result parses"), AddResult.Get()))
+	{
+		TestTrue (TEXT("added:true"),              AddResult->GetBoolField(TEXT("added")));
+		TestFalse(TEXT("already_compatible:false"), AddResult->GetBoolField(TEXT("already_compatible")));
+		TestTrue (TEXT("compatible_count >= 1"),
+			AddResult->GetNumberField(TEXT("compatible_count")) >= 1.0);
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 2 — idempotency: calling again must return added:false, already_compatible:true.
+	// -----------------------------------------------------------------------
+	const TSharedPtr<FJsonObject> IdemResult = AgentMcpTestUtils::CallTool(*this,
+		TEXT("add_compatible_skeleton"),
+		FString::Printf(
+			TEXT("{\"skeleton_path\":\"%s\",\"compatible_skeleton_path\":\"%s\"}"),
+			*SkelAPath, *SkelBPath),
+		bIsError);
+
+	TestFalse(TEXT("idempotent call succeeds (no error)"), bIsError);
+	if (TestNotNull(TEXT("idem result parses"), IdemResult.Get()))
+	{
+		TestFalse(TEXT("idem added:false"),              IdemResult->GetBoolField(TEXT("added")));
+		TestTrue (TEXT("idem already_compatible:true"),  IdemResult->GetBoolField(TEXT("already_compatible")));
+	}
+
+	// -----------------------------------------------------------------------
+	// Step 3 — error: same skeleton for both paths (self-compatible).
+	// -----------------------------------------------------------------------
+	const FString SelfErr = AgentMcpTestUtils::CallToolRawText(*this,
+		TEXT("add_compatible_skeleton"),
+		FString::Printf(
+			TEXT("{\"skeleton_path\":\"%s\",\"compatible_skeleton_path\":\"%s\"}"),
+			*SkelAPath, *SkelAPath),
+		bIsError);
+	TestTrue(TEXT("self-compatible is error"), bIsError);
+	TestTrue(TEXT("self error mentions 'same'"),
+		SelfErr.Contains(TEXT("same"), ESearchCase::IgnoreCase));
+
+	// -----------------------------------------------------------------------
+	// Step 4 — error: non-skeleton asset path (use the idle AnimSequence).
+	// -----------------------------------------------------------------------
+	const FString NonSkelErr = AgentMcpTestUtils::CallToolRawText(*this,
+		TEXT("add_compatible_skeleton"),
+		FString::Printf(
+			TEXT("{\"skeleton_path\":\"%s\",\"compatible_skeleton_path\":\"/Game/Characters/Mannequins/Animations/Manny/MM_Idle\"}"),
+			*SkelAPath),
+		bIsError);
+	TestTrue(TEXT("non-skeleton asset is error"), bIsError);
+
+	// -----------------------------------------------------------------------
+	// Cleanup: mark transient objects as garbage so GC can reclaim them.
+	// -----------------------------------------------------------------------
+	SkelA->ClearFlags(RF_Standalone);
+	SkelB->ClearFlags(RF_Standalone);
 
 	return true;
 }

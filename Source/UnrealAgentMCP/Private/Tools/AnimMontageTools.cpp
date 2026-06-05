@@ -5,6 +5,7 @@
 #include "Animation/AnimSequence.h"
 #include "Animation/AnimSequenceBase.h"
 #include "Animation/AnimCompositeBase.h"
+#include "Animation/Skeleton.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
@@ -447,6 +448,120 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
+	// ---------------------------------------------------------------------------
+	// add_compatible_skeleton
+	// ---------------------------------------------------------------------------
+
+	/**
+	 * Resolves a USkeleton from a package path.
+	 * Returns nullptr and fills OutError on failure.
+	 */
+	USkeleton* ResolveSkeleton(const FString& Path, FString& OutError)
+	{
+		// Build a fully-qualified object path (PackageName.AssetName).
+		// If the caller already supplied one (contains a dot) use it as-is.
+		// Otherwise derive the asset name from the short package name.
+		FString ObjectPath;
+		{
+			int32 DotIdx = INDEX_NONE;
+			if (Path.FindChar(TEXT('.'), DotIdx))
+			{
+				ObjectPath = Path;
+			}
+			else
+			{
+				const FString ShortName = FPackageName::GetShortName(Path);
+				ObjectPath = Path + TEXT(".") + ShortName;
+			}
+		}
+
+		// FindObject covers transient / already-loaded objects (no disk I/O).
+		USkeleton* Skel = FindObject<USkeleton>(nullptr, *ObjectPath);
+		if (!Skel)
+		{
+			Skel = LoadObject<USkeleton>(nullptr, *ObjectPath);
+		}
+		if (!Skel)
+		{
+			OutError = FString::Printf(
+				TEXT("Path '%s' could not be loaded as a USkeleton. "
+				     "Verify the path points to a Skeleton asset (not a SkeletalMesh or other type)."),
+				*Path);
+		}
+		return Skel;
+	}
+
+	FAgentMcpToolResult HandleAddCompatibleSkeleton(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString SkeletonPath, CompatPath;
+
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("skeleton_path"), SkeletonPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'skeleton_path'."));
+		}
+		if (!Args->TryGetStringField(TEXT("compatible_skeleton_path"), CompatPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'compatible_skeleton_path'."));
+		}
+
+		// Load both skeletons.
+		FString ErrA, ErrB;
+		USkeleton* MainSkeleton  = ResolveSkeleton(SkeletonPath, ErrA);
+		if (!MainSkeleton)
+		{
+			return FAgentMcpToolResult::Error(ErrA);
+		}
+		USkeleton* CompatSkeleton = ResolveSkeleton(CompatPath, ErrB);
+		if (!CompatSkeleton)
+		{
+			return FAgentMcpToolResult::Error(ErrB);
+		}
+
+		// Self-registration is not meaningful.
+		if (MainSkeleton == CompatSkeleton)
+		{
+			return FAgentMcpToolResult::Error(
+				TEXT("'skeleton_path' and 'compatible_skeleton_path' resolve to the same asset. "
+				     "A skeleton cannot be added as compatible with itself."));
+		}
+
+		// Check idempotency: is the compat skeleton already registered?
+		const TSoftObjectPtr<USkeleton> CompatSoft(CompatSkeleton);
+		const TArray<TSoftObjectPtr<USkeleton>>& Existing = MainSkeleton->GetCompatibleSkeletons();
+		for (const TSoftObjectPtr<USkeleton>& Entry : Existing)
+		{
+			if (Entry == CompatSoft)
+			{
+				// Already compatible — return idempotent success.
+				TSharedRef<FJsonObject> IdempResult = MakeShared<FJsonObject>();
+				IdempResult->SetBoolField(TEXT("added"),              false);
+				IdempResult->SetBoolField(TEXT("already_compatible"), true);
+				IdempResult->SetStringField(TEXT("skeleton"),            MainSkeleton->GetPathName());
+				IdempResult->SetStringField(TEXT("compatible_skeleton"), CompatSkeleton->GetPathName());
+				IdempResult->SetNumberField(TEXT("compatible_count"),
+					static_cast<double>(Existing.Num()));
+				return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(IdempResult));
+			}
+		}
+
+		// Modify under a transaction.
+		FScopedTransaction Transaction(
+			NSLOCTEXT("AgentMcp", "AddCompatibleSkeleton", "MCP: Add Compatible Skeleton"));
+		MainSkeleton->Modify();
+		MainSkeleton->AddCompatibleSkeleton(CompatSkeleton);
+		MainSkeleton->MarkPackageDirty();
+
+		const int32 NewCount = MainSkeleton->GetCompatibleSkeletons().Num();
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("added"),              true);
+		Result->SetBoolField(TEXT("already_compatible"), false);
+		Result->SetStringField(TEXT("skeleton"),            MainSkeleton->GetPathName());
+		Result->SetStringField(TEXT("compatible_skeleton"), CompatSkeleton->GetPathName());
+		Result->SetNumberField(TEXT("compatible_count"),    static_cast<double>(NewCount));
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
 } // namespace
 
 // ---------------------------------------------------------------------------
@@ -561,6 +676,51 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddAnimNotify);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// ── add_compatible_skeleton ──────────────────────────────────────────────
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("add_compatible_skeleton");
+		Def.Description = TEXT(
+			"SafeWrite. Registers a foreign USkeleton as compatible with the project's main skeleton, "
+			"solving the common issue where marketplace animation packs ship their own USkeleton copy "
+			"(structurally identical but a different asset) that prevents animations from playing on the "
+			"project character. Wraps USkeleton::AddCompatibleSkeleton under a scoped transaction and "
+			"marks the package dirty. "
+			"Idempotent: if the skeleton is already listed as compatible, returns {added:false, already_compatible:true} without modifying the asset. "
+			"Returns {added, already_compatible, skeleton, compatible_skeleton, compatible_count}. "
+			"Args: skeleton_path (required, project main skeleton e.g. /Game/Characters/Mannequins/Meshes/SK_Mannequin), "
+			"compatible_skeleton_path (required, the marketplace/foreign skeleton to register).");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Props = MakeShared<FJsonObject>();
+
+			TSharedRef<FJsonObject> SkelProp = MakeShared<FJsonObject>();
+			SkelProp->SetStringField(TEXT("type"), TEXT("string"));
+			SkelProp->SetStringField(TEXT("description"),
+				TEXT("Package path of the project's main USkeleton to modify, "
+				     "e.g. /Game/Characters/Mannequins/Meshes/SK_Mannequin."));
+			Props->SetObjectField(TEXT("skeleton_path"), SkelProp);
+
+			TSharedRef<FJsonObject> CompatProp = MakeShared<FJsonObject>();
+			CompatProp->SetStringField(TEXT("type"), TEXT("string"));
+			CompatProp->SetStringField(TEXT("description"),
+				TEXT("Package path of the foreign USkeleton to register as compatible, "
+				     "e.g. /Game/MarketplacePack/Characters/SK_Hero_Skeleton."));
+			Props->SetObjectField(TEXT("compatible_skeleton_path"), CompatProp);
+
+			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
+
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("skeleton_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("compatible_skeleton_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddCompatibleSkeleton);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
