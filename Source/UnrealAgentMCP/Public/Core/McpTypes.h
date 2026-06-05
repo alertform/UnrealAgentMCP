@@ -7,7 +7,7 @@
 namespace AgentMcp
 {
 	/** Single source of truth for the plugin version reported by initialize and engine_info. */
-	inline constexpr const TCHAR* PluginVersion = TEXT("1.1.0");
+	inline constexpr const TCHAR* PluginVersion = TEXT("1.2.0");
 }
 
 /** Outcome of one tool invocation. Text carries the payload (JSON string or plain message). */
