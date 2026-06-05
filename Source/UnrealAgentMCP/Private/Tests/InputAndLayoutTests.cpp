@@ -2,15 +2,43 @@
 
 #if WITH_DEV_AUTOMATION_TESTS
 
+#include "AgentMcpSettings.h"
+#include "Core/AgentMcpTier.h"
 #include "InputAction.h"
 #include "InputMappingContext.h"
+#include "Misc/ScopeExit.h"
 #include "Tests/AgentMcpTestHelpers.h"
+
+// ---------------------------------------------------------------------------
+// Helper: delete an asset via the tool (mirrors AnimAndGeToolsTests pattern).
+// Raises tier to Destructive for the call, then restores.
+// ---------------------------------------------------------------------------
+namespace
+{
+	void CleanupInputAsset(FAutomationTestBase& Test, const FString& Path)
+	{
+		UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
+		const EAgentMcpTier Saved = Settings->PermissionTier;
+		Settings->PermissionTier = EAgentMcpTier::Destructive;
+		bool bErr = false;
+		AgentMcpTestUtils::CallTool(Test, TEXT("delete_asset"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *Path), bErr);
+		Settings->PermissionTier = Saved;
+	}
+}
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInputAssetCreationTest,
 	"UnrealAgentMCP.Input.CreateActionAndContext",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FInputAssetCreationTest::RunTest(const FString& Parameters)
 {
+	// Unconditional cleanup so a failed run doesn't leave unsaved package debris.
+	ON_SCOPE_EXIT
+	{
+		CleanupInputAsset(*this, TEXT("/Game/Dev/AgentMcpTests/IA_McpMove"));
+		CleanupInputAsset(*this, TEXT("/Game/Dev/AgentMcpTests/IMC_McpDefault"));
+	};
+
 	bool bIsError = false;
 
 	// create_input_action with axis2d value type (in-memory asset, not saved).
@@ -55,6 +83,13 @@ IMPLEMENT_SIMPLE_AUTOMATION_TEST(FInputMappingEntryTest,
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FInputMappingEntryTest::RunTest(const FString& Parameters)
 {
+	// Unconditional cleanup so a failed run doesn't leave unsaved package debris.
+	ON_SCOPE_EXIT
+	{
+		CleanupInputAsset(*this, TEXT("/Game/Dev/AgentMcpTests/IA_McpJump"));
+		CleanupInputAsset(*this, TEXT("/Game/Dev/AgentMcpTests/IMC_McpJumpCtx"));
+	};
+
 	bool bIsError = false;
 
 	// Fixture: fresh action + context via the tools themselves.
