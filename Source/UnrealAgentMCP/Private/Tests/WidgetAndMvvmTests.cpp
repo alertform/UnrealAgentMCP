@@ -916,4 +916,82 @@ bool FRenameWidgetTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// FListDirtyPackagesTest
+// Verifies list_dirty_packages returns the expected schema and that a freshly
+// created in-memory /Game/ blueprint appears in the "content" array.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FListDirtyPackagesTest,
+	"UnrealAgentMCP.P6.ListDirtyPackages",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FListDirtyPackagesTest::RunTest(const FString& Parameters)
+{
+	UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
+	const EAgentMcpTier SavedCeiling = Settings->PermissionTier;
+	ON_SCOPE_EXIT { GetMutableDefault<UAgentMcpSettings>()->PermissionTier = SavedCeiling; };
+
+	bool bIsError = false;
+
+	// Step 1 — call list_dirty_packages: must succeed and have count/maps/content fields.
+	{
+		const TSharedPtr<FJsonObject> Result = AgentMcpTestUtils::CallTool(*this, TEXT("list_dirty_packages"),
+			TEXT("{}"), bIsError);
+		TestFalse(TEXT("list_dirty_packages initial call ok"), bIsError);
+		if (TestNotNull(TEXT("initial result parses"), Result.Get()))
+		{
+			TestTrue(TEXT("count field present"), Result->HasField(TEXT("count")));
+			TestTrue(TEXT("maps field present"),  Result->HasField(TEXT("maps")));
+			TestTrue(TEXT("content field present"), Result->HasField(TEXT("content")));
+		}
+	}
+
+	// Step 2 — create an in-memory /Game/ blueprint (marks its package dirty).
+	const FString TestAssetPath = TEXT("/Game/Dev/BP_McpDirtyTest");
+	{
+		const TSharedPtr<FJsonObject> CreateResult = AgentMcpTestUtils::CallTool(*this, TEXT("create_blueprint"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *TestAssetPath), bIsError);
+		TestFalse(TEXT("create_blueprint for dirty-test ok"), bIsError);
+		if (!TestNotNull(TEXT("create result parses"), CreateResult.Get()))
+		{
+			return true;
+		}
+	}
+
+	// Step 3 — list_dirty_packages again: "content" must contain the new blueprint; count >= 1.
+	{
+		const TSharedPtr<FJsonObject> Result = AgentMcpTestUtils::CallTool(*this, TEXT("list_dirty_packages"),
+			TEXT("{}"), bIsError);
+		TestFalse(TEXT("list_dirty_packages after create ok"), bIsError);
+		if (TestNotNull(TEXT("post-create result parses"), Result.Get()))
+		{
+			TestTrue(TEXT("count >= 1 after create"), (int32)Result->GetNumberField(TEXT("count")) >= 1);
+
+			bool bFound = false;
+			for (const TSharedPtr<FJsonValue>& Val : Result->GetArrayField(TEXT("content")))
+			{
+				if (Val->AsString() == TestAssetPath)
+				{
+					bFound = true;
+					break;
+				}
+			}
+			TestTrue(TEXT("content array contains BP_McpDirtyTest"), bFound);
+		}
+	}
+
+	// Step 4 — cleanup: raise to Destructive, delete the test blueprint, restore tier.
+	Settings->PermissionTier = EAgentMcpTier::Destructive;
+	{
+		const TSharedPtr<FJsonObject> DelResult = AgentMcpTestUtils::CallTool(*this, TEXT("delete_asset"),
+			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *TestAssetPath), bIsError);
+		TestFalse(TEXT("delete_asset cleanup ok"), bIsError);
+		if (TestNotNull(TEXT("delete result parses"), DelResult.Get()))
+		{
+			TestTrue(TEXT("deleted:true"), DelResult->GetBoolField(TEXT("deleted")));
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

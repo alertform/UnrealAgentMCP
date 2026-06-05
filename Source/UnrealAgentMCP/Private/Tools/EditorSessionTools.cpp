@@ -8,6 +8,7 @@
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
 #include "Editor.h"
+#include "FileHelpers.h"
 #include "Misc/Paths.h"
 #include "Tools/McpToolUtils.h"
 #include "UnrealClient.h"
@@ -141,6 +142,40 @@ namespace
 		Result->SetArrayField(TEXT("entries"), EntryValues);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	FAgentMcpToolResult HandleListDirtyPackages(const TSharedPtr<FJsonObject>& /*Args*/)
+	{
+		TArray<UPackage*> DirtyMaps;
+		TArray<UPackage*> DirtyContent;
+		UEditorLoadingAndSavingUtils::GetDirtyMapPackages(DirtyMaps);
+		UEditorLoadingAndSavingUtils::GetDirtyContentPackages(DirtyContent);
+
+		TArray<TSharedPtr<FJsonValue>> MapNames;
+		MapNames.Reserve(DirtyMaps.Num());
+		for (UPackage* Pkg : DirtyMaps)
+		{
+			if (Pkg)
+			{
+				MapNames.Add(MakeShared<FJsonValueString>(Pkg->GetName()));
+			}
+		}
+
+		TArray<TSharedPtr<FJsonValue>> ContentNames;
+		ContentNames.Reserve(DirtyContent.Num());
+		for (UPackage* Pkg : DirtyContent)
+		{
+			if (Pkg)
+			{
+				ContentNames.Add(MakeShared<FJsonValueString>(Pkg->GetName()));
+			}
+		}
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetNumberField(TEXT("count"), MapNames.Num() + ContentNames.Num());
+		Result->SetArrayField(TEXT("maps"), MapNames);
+		Result->SetArrayField(TEXT("content"), ContentNames);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterEditorSessionTools()
@@ -250,6 +285,17 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 		}
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAuditTail);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("list_dirty_packages");
+		Def.Description = TEXT("Lists unsaved (dirty) packages — maps and content separately. Call before closing the editor or after a batch of edits to know what needs persisting. Content packages: save via save_asset. Map packages: must be saved in-editor (File > Save) — save_asset refuses them by design.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
+		Def.Tier = EAgentMcpTier::ReadOnly;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleListDirtyPackages);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
