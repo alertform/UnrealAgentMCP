@@ -32,6 +32,8 @@ public class UnrealAgentMCP : ModuleRules
 			"ModelViewViewModel",
 			"FieldNotification",
 			"MovieScene",
+			"GameplayAbilities",
+			"GameplayTags",
 		});
 	}
 }

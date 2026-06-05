@@ -7,10 +7,10 @@ No middleman process: the C++ plugin speaks MCP streamable-HTTP directly.
 Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Editor (this plugin)
 ```
 
-## Status: 1.2.0 — 47 tools
+## Status: 1.3-dev — 50 tools
 
 - MCP methods: `initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call`
-- Tools (47): `engine_info`, `list_assets`, `read_graph`, `add_node`, `connect_pins`, `set_pin_default`, `delete_node`, `auto_layout`, `add_component_event`, `create_blueprint`, `compile_blueprint`, `undo`, `redo`, `read_output_log`, `take_screenshot`, `console_command`, `audit_tail`, `list_dirty_packages`, `get_cdo_property`, `set_cdo_property`, `reparent_blueprint`, `search_assets`, `get_asset_info`, `get_references`, `save_asset`, `delete_asset`, `spawn_actor`, `set_actor_transform`, `set_actor_property`, `query_actors`, `destroy_actor`, `add_variable`, `set_variable_flags`, `add_component`, `attach_component`, `set_component_property`, `create_input_action`, `create_mapping_context`, `add_mapping_entry`, `add_widget`, `list_widgets`, `set_widget_property`, `rename_widget`, `add_viewmodel`, `add_view_binding`, `list_view_bindings`, `remove_view_binding`
+- Tools (50): `engine_info`, `list_assets`, `read_graph`, `add_node`, `connect_pins`, `set_pin_default`, `delete_node`, `auto_layout`, `add_component_event`, `create_blueprint`, `compile_blueprint`, `undo`, `redo`, `read_output_log`, `take_screenshot`, `console_command`, `audit_tail`, `list_dirty_packages`, `get_cdo_property`, `set_cdo_property`, `reparent_blueprint`, `search_assets`, `get_asset_info`, `get_references`, `save_asset`, `delete_asset`, `spawn_actor`, `set_actor_transform`, `set_actor_property`, `query_actors`, `destroy_actor`, `add_variable`, `set_variable_flags`, `add_component`, `attach_component`, `set_component_property`, `create_input_action`, `create_mapping_context`, `add_mapping_entry`, `add_widget`, `list_widgets`, `set_widget_property`, `rename_widget`, `add_viewmodel`, `add_view_binding`, `list_view_bindings`, `remove_view_binding`, `create_anim_montage`, `add_anim_notify`, `set_ge_target_tags`
 - **Three-tier permission ceiling** (ReadOnly / SafeWrite / Destructive) enforced at the single dispatch seam. Destructive tools (`console_command`, `destroy_actor`) are rejected out of the box — raise the ceiling deliberately in Project Settings. Rejections carry a structured `rejected_by_tier` field so agents can branch on policy, not message text
 - **Full audit trail**: every call (and every rejection) lands in `Saved/AgentMCP/audit-YYYYMMDD.jsonl`; Destructive calls additionally write a pre-execute `:started` entry so even an editor-killing command is forensically attributable. Inspect from the agent via `audit_tail`
 - Closed loop: the agent edits the graph, compiles, reads structured errors back, fixes, recompiles (P2 acceptance locked in `UnrealAgentMCP.NodeGraph.P2AcceptanceClosedLoop`)
@@ -28,6 +28,7 @@ Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Edit
 - `list_dirty_packages` (1.2): unsaved-state visibility (maps vs content) — call before quitting the editor; born from a live incident where unsaved binding edits were lost on quit
 - Content class paths everywhere (1.2): `/Game/UI/WBP_X` resolves without the `.WBP_X_C` suffix in `EntryWidgetClass` too; unresolvable classes are honest errors, never silent base-class substitutions
 - `get_asset_info` filters the Find-in-Blueprint binary blob and oversized tags (1.2) — responses stay agent-sized
+- **Anim montage authoring + GE target tags** (1.3-dev): `create_anim_montage` builds a skeleton-matched UAnimMontage from any AnimSequence; `add_anim_notify` attaches any UAnimNotify subclass at an absolute time or fraction with optional property import; `set_ge_target_tags` grants tags to a GameplayEffect's target via `UTargetTagsGameplayEffectComponent` — dogfooding source: GA_Fireball cooldown + hit-event authoring workflow
 
 This release was specified by **dogfooding**: 1.0 was pointed at real main-menu UI work, and every action that still required human hands in the editor (class pin dropdowns, widget creation, MVVM binding panels, GameMode overrides, asset deletion) became a 1.1 tool; 1.2 closed the gaps the 1.1 cycle itself surfaced (widget rename, dirty-state visibility, path ergonomics).
 
@@ -59,7 +60,7 @@ Source/UnrealAgentMCP/
 └── Private/
     ├── Server/McpHttpServer.*      transport (engine HTTPServer module, game-thread handlers)
     ├── Tools/                      tool implementations (one family per file)
-    └── Tests/                      automation tests (42, covering P1-P6)
+    └── Tests/                      automation tests (50, covering P1-P7)
 ```
 
 Layer contract: the protocol layer never sees HTTP; the transport never sees tools; tools never see JSON-RPC. Everything meets at the registry.
@@ -77,7 +78,7 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAgentMCP" -TestExit="Automation Test Queue Empty" -NullRHI -unattended -nopause -nosplash -log
 ```
 
-42 tests: registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5), P3b tool families — CDO get/set, asset search/info/refs/save, actor spawn/query/transform/destroy, variable add/flags, component add/attach/set, reparent (7), input + layout — input asset creation, mapping entries, auto_layout invariants (3), P5 widget + MVVM + gap-fill — class pin defaults, system-actor access, referencer-gated delete, widget-tree authoring, component bound events, MVVM authoring error contracts, binding list/remove lifecycle (7), P6 polish — widget rename incl. MVVM reference sync, dirty-package listing (2).
+42 tests (baseline): registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5), P3b tool families — CDO get/set, asset search/info/refs/save, actor spawn/query/transform/destroy, variable add/flags, component add/attach/set, reparent (7), input + layout — input asset creation, mapping entries, auto_layout invariants (3), P5 widget + MVVM + gap-fill — class pin defaults, system-actor access, referencer-gated delete, widget-tree authoring, component bound events, MVVM authoring error contracts, binding list/remove lifecycle (7), P6 polish — widget rename incl. MVVM reference sync, dirty-package listing (2). **+8 P7 tests** (1.3-dev): FCreateAnimMontageTest, FAddAnimNotifyTest, FSetGeTargetTagsTest (each with multiple error-path assertions).
 
 ## Smoke test (curl)
 
