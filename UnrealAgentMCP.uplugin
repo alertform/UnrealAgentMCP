@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.0",
+	"VersionName": "1.1.0",
 	"FriendlyName": "Unreal Agent MCP",
 	"Description": "Native MCP (Model Context Protocol) server inside the Unreal Editor. Lets AI agents like Claude Code drive the editor over streamable HTTP - no middleman process.",
 	"Category": "Editor",
