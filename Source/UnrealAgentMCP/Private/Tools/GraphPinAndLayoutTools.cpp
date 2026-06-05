@@ -16,30 +16,8 @@ namespace
 {
 	using namespace AgentMcp;
 
-	/** Shared arg unpacking: blueprint_path (required) + graph_name (optional). */
-	bool ResolveGraphArgs(const TSharedPtr<FJsonObject>& Args, UBlueprint*& OutBlueprint, UEdGraph*& OutGraph, FString& OutError)
-	{
-		if (!Args.IsValid())
-		{
-			OutError = TEXT("Missing arguments: blueprint_path is required.");
-			return false;
-		}
-		FString BlueprintPath;
-		if (!Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
-		{
-			OutError = TEXT("Missing required string argument 'blueprint_path'.");
-			return false;
-		}
-		OutBlueprint = NodeGraphUtils::ResolveBlueprint(BlueprintPath, OutError);
-		if (!OutBlueprint)
-		{
-			return false;
-		}
-		FString GraphName;
-		Args->TryGetStringField(TEXT("graph_name"), GraphName);
-		OutGraph = NodeGraphUtils::ResolveGraph(OutBlueprint, GraphName, OutError);
-		return OutGraph != nullptr;
-	}
+	// ResolveGraphArgs/MakeGraphArgsSchema live in NodeGraphUtils: duplicate
+	// anonymous-namespace definitions across tool TUs collide in unity builds.
 
 	// -----------------------------------------------------------------------
 	// set_pin_default
@@ -50,7 +28,7 @@ namespace
 		UBlueprint* Blueprint = nullptr;
 		UEdGraph* Graph = nullptr;
 		FString Error;
-		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		if (!NodeGraphUtils::ResolveGraphArgs(Args, Blueprint, Graph, Error))
 		{
 			return FAgentMcpToolResult::Error(Error);
 		}
@@ -189,29 +167,9 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
-	TSharedRef<FJsonObject> MakeGraphArgsSchema()
-	{
-		TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
-		Schema->SetStringField(TEXT("type"), TEXT("object"));
-		TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
-		TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
-		PathProp->SetStringField(TEXT("type"), TEXT("string"));
-		PathProp->SetStringField(TEXT("description"), TEXT("Blueprint asset path, e.g. /Game/Blueprints/BP_Foo"));
-		Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
-		TSharedRef<FJsonObject> GraphProp = MakeShared<FJsonObject>();
-		GraphProp->SetStringField(TEXT("type"), TEXT("string"));
-		GraphProp->SetStringField(TEXT("description"), TEXT("Graph name; defaults to the event graph"));
-		Properties->SetObjectField(TEXT("graph_name"), GraphProp);
-		Schema->SetObjectField(TEXT("properties"), Properties);
-		TArray<TSharedPtr<FJsonValue>> Required;
-		Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
-		Schema->SetArrayField(TEXT("required"), Required);
-		return Schema;
-	}
-
 	TSharedRef<FJsonObject> MakeSetPinDefaultSchema()
 	{
-		TSharedRef<FJsonObject> Schema = MakeGraphArgsSchema();
+		TSharedRef<FJsonObject> Schema = NodeGraphUtils::MakeGraphArgsSchema();
 		TSharedRef<FJsonObject> Props = Schema->GetObjectField(TEXT("properties")).ToSharedRef();
 		{
 			TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
@@ -248,7 +206,7 @@ namespace
 		UBlueprint* Blueprint = nullptr;
 		UEdGraph* Graph = nullptr;
 		FString Error;
-		if (!ResolveGraphArgs(Args, Blueprint, Graph, Error))
+		if (!NodeGraphUtils::ResolveGraphArgs(Args, Blueprint, Graph, Error))
 		{
 			return FAgentMcpToolResult::Error(Error);
 		}
@@ -363,7 +321,7 @@ void AgentMcp::Tools::RegisterGraphPinAndLayoutTools()
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("auto_layout");
 		Def.Description = TEXT("Rearranges all nodes in a graph into left-to-right layers by connection depth. Destructive to manual layout (undoable via Ctrl+Z). Returns {laid_out, layers}. Args: blueprint_path (required), graph_name (optional, defaults to EventGraph).");
-		Def.InputSchema = MakeGraphArgsSchema();
+		Def.InputSchema = NodeGraphUtils::MakeGraphArgsSchema();
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAutoLayout);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));

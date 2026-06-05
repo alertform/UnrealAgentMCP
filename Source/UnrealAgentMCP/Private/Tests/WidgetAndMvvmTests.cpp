@@ -928,7 +928,18 @@ bool FListDirtyPackagesTest::RunTest(const FString& Parameters)
 {
 	UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
 	const EAgentMcpTier SavedCeiling = Settings->PermissionTier;
-	ON_SCOPE_EXIT { GetMutableDefault<UAgentMcpSettings>()->PermissionTier = SavedCeiling; };
+	// Unconditional cleanup — early returns must not leak the test asset into later
+	// tests'/sessions' dirty lists (T4 review finding). delete_asset on a never-created
+	// asset is a harmless tool error, swallowed here.
+	ON_SCOPE_EXIT
+	{
+		UAgentMcpSettings* ExitSettings = GetMutableDefault<UAgentMcpSettings>();
+		ExitSettings->PermissionTier = EAgentMcpTier::Destructive;
+		bool bCleanupError = false;
+		AgentMcpTestUtils::CallTool(*this, TEXT("delete_asset"),
+			TEXT("{\"asset_path\":\"/Game/Dev/BP_McpDirtyTest\"}"), bCleanupError);
+		ExitSettings->PermissionTier = SavedCeiling;
+	};
 
 	bool bIsError = false;
 

@@ -31,4 +31,12 @@ namespace AgentMcp::NodeGraphUtils
 
 	/** {blueprint, graph, node_count, nodes:[...]} */
 	TSharedRef<FJsonObject> GraphToJson(const UBlueprint* Blueprint, const UEdGraph* Graph);
+
+	/** Shared arg unpacking for node-graph tools: blueprint_path (required) + graph_name (optional).
+	 *  Lives here (not file-local) because multiple tool TUs need it — duplicate anonymous-namespace
+	 *  definitions collide in unity builds. */
+	bool ResolveGraphArgs(const TSharedPtr<FJsonObject>& Args, UBlueprint*& OutBlueprint, UEdGraph*& OutGraph, FString& OutError);
+
+	/** Base InputSchema for graph tools: blueprint_path (required) + graph_name (optional). */
+	TSharedRef<FJsonObject> MakeGraphArgsSchema();
 }

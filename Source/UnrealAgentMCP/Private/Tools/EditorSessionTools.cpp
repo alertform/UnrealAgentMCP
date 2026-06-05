@@ -154,7 +154,7 @@ namespace
 		MapNames.Reserve(DirtyMaps.Num());
 		for (UPackage* Pkg : DirtyMaps)
 		{
-			if (Pkg)
+			if (IsValid(Pkg)) // null AND pending-kill guard (T4 review)
 			{
 				MapNames.Add(MakeShared<FJsonValueString>(Pkg->GetName()));
 			}
@@ -164,7 +164,7 @@ namespace
 		ContentNames.Reserve(DirtyContent.Num());
 		for (UPackage* Pkg : DirtyContent)
 		{
-			if (Pkg)
+			if (IsValid(Pkg)) // null AND pending-kill guard (T4 review)
 			{
 				ContentNames.Add(MakeShared<FJsonValueString>(Pkg->GetName()));
 			}

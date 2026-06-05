@@ -210,3 +210,48 @@ TSharedRef<FJsonObject> AgentMcp::NodeGraphUtils::GraphToJson(const UBlueprint* 
 	Json->SetArrayField(TEXT("nodes"), Nodes);
 	return Json;
 }
+
+
+bool AgentMcp::NodeGraphUtils::ResolveGraphArgs(const TSharedPtr<FJsonObject>& Args, UBlueprint*& OutBlueprint, UEdGraph*& OutGraph, FString& OutError)
+{
+	if (!Args.IsValid())
+	{
+		OutError = TEXT("Missing arguments: blueprint_path is required.");
+		return false;
+	}
+	FString BlueprintPath;
+	if (!Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+	{
+		OutError = TEXT("Missing required string argument 'blueprint_path'.");
+		return false;
+	}
+	OutBlueprint = ResolveBlueprint(BlueprintPath, OutError);
+	if (!OutBlueprint)
+	{
+		return false;
+	}
+	FString GraphName;
+	Args->TryGetStringField(TEXT("graph_name"), GraphName);
+	OutGraph = ResolveGraph(OutBlueprint, GraphName, OutError);
+	return OutGraph != nullptr;
+}
+
+TSharedRef<FJsonObject> AgentMcp::NodeGraphUtils::MakeGraphArgsSchema()
+{
+	TSharedRef<FJsonObject> Schema = MakeShared<FJsonObject>();
+	Schema->SetStringField(TEXT("type"), TEXT("object"));
+	TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+	TSharedRef<FJsonObject> PathProp = MakeShared<FJsonObject>();
+	PathProp->SetStringField(TEXT("type"), TEXT("string"));
+	PathProp->SetStringField(TEXT("description"), TEXT("Blueprint asset path, e.g. /Game/Blueprints/BP_Foo"));
+	Properties->SetObjectField(TEXT("blueprint_path"), PathProp);
+	TSharedRef<FJsonObject> GraphProp = MakeShared<FJsonObject>();
+	GraphProp->SetStringField(TEXT("type"), TEXT("string"));
+	GraphProp->SetStringField(TEXT("description"), TEXT("Graph name; defaults to the event graph"));
+	Properties->SetObjectField(TEXT("graph_name"), GraphProp);
+	Schema->SetObjectField(TEXT("properties"), Properties);
+	TArray<TSharedPtr<FJsonValue>> Required;
+	Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+	Schema->SetArrayField(TEXT("required"), Required);
+	return Schema;
+}
