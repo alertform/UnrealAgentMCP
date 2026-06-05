@@ -375,6 +375,8 @@ bool FWidgetTreeAuthoringTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("error mentions list_widgets"), NoWidgetErr.Contains(TEXT("list_widgets"), ESearchCase::IgnoreCase));
 
 	// Step 8 — compile_blueprint -> status ok, num_errors 0.
+	// (Runs BEFORE the ListView case below: a ListView with no valid EntryWidgetClass is a
+	//  Widget-compiler ERROR by design, which would poison this clean-compile assertion.)
 	const TSharedPtr<FJsonObject> Compiled = AgentMcpTestUtils::CallTool(*this, TEXT("compile_blueprint"),
 		FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path),
 		bIsError);
@@ -383,6 +385,23 @@ bool FWidgetTreeAuthoringTest::RunTest(const FString& Parameters)
 	{
 		TestEqual(TEXT("compile status ok"), Compiled->GetStringField(TEXT("status")), FString(TEXT("ok")));
 		TestEqual(TEXT("compile num_errors 0"), (int32)Compiled->GetNumberField(TEXT("num_errors")), 0);
+	}
+
+	// Step 9 — EntryWidgetClass MustImplement guard: a ListView must reject an entry class
+	// that does not implement IUserListEntry (T4 review finding: highest-risk validation branch).
+	// No compile after this — the half-configured ListView is intentionally left behind in the
+	// transient blueprint.
+	{
+		const TSharedPtr<FJsonObject> AddList = AgentMcpTestUtils::CallTool(*this, TEXT("add_widget"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_class\":\"ListView\",\"widget_name\":\"TestListView\",\"parent_name\":\"MenuRoot\"}"), *Path),
+			bIsError);
+		TestFalse(TEXT("add ListView ok"), bIsError);
+
+		const FString BadEntryErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("set_widget_property"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"widget_name\":\"TestListView\",\"property\":\"EntryWidgetClass\",\"value\":\"/Script/UMG.Button\"}"), *Path),
+			bIsError);
+		TestTrue(TEXT("non-IUserListEntry entry class is error"), bIsError);
+		TestTrue(TEXT("error mentions IUserListEntry"), BadEntryErr.Contains(TEXT("IUserListEntry"), ESearchCase::IgnoreCase));
 	}
 
 	return true;

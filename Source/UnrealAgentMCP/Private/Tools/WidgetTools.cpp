@@ -14,6 +14,7 @@
 #include "K2Node_ComponentBoundEvent.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "Misc/PackageName.h"
 #include "ScopedTransaction.h"
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
@@ -58,6 +59,27 @@ namespace
 	{
 		// TryFindTypeSlow handles both short names and full /Script/ paths.
 		UClass* Class = UClass::TryFindTypeSlow<UClass>(ClassToken);
+		if (!Class && ClassToken.StartsWith(TEXT("/")) && !ClassToken.StartsWith(TEXT("/Script/")))
+		{
+			// Content path (user widget): accept /Game/UI/WBP_X, /Game/UI/WBP_X.WBP_X and
+			// /Game/UI/WBP_X.WBP_X_C alike — normalize to the generated-class object path
+			// (T4 review finding: callers naturally omit the _C suffix).
+			FString ClassPath = ClassToken;
+			if (!ClassPath.EndsWith(TEXT("_C")))
+			{
+				FString PackagePath = ClassPath;
+				FString ObjectName;
+				if (PackagePath.Split(TEXT("."), &PackagePath, &ObjectName))
+				{
+					ClassPath = FString::Printf(TEXT("%s.%s_C"), *PackagePath, *ObjectName);
+				}
+				else
+				{
+					ClassPath = FString::Printf(TEXT("%s.%s_C"), *ClassPath, *FPackageName::GetShortName(ClassPath));
+				}
+			}
+			Class = LoadObject<UClass>(nullptr, *ClassPath);
+		}
 		if (!Class)
 		{
 			// Fallback: try prefixing /Script/UMG. for bare names like "Button".
@@ -67,7 +89,7 @@ namespace
 		if (!Class)
 		{
 			OutError = FString::Printf(
-				TEXT("Widget class '%s' not found. Use a short name like 'Button', 'TextBlock', 'VerticalBox', or a full path like /Script/UMG.Button."),
+				TEXT("Widget class '%s' not found. Use a short name like 'Button', 'TextBlock', 'VerticalBox', a /Script/UMG.X path, or a user-widget path like /Game/UI/WBP_MyWidget."),
 				*ClassToken);
 			return nullptr;
 		}
@@ -119,13 +141,9 @@ namespace
 			return FAgentMcpToolResult::Error(Error);
 		}
 
-		// Ensure WidgetTree exists.
+		// May be null on a freshly created blueprint — created inside the transaction below
+		// so a Cancel() rolls the assignment back (T4 review finding).
 		UWidgetTree* Tree = WBP->WidgetTree;
-		if (!Tree)
-		{
-			Tree = NewObject<UWidgetTree>(WBP, NAME_None, RF_Transactional);
-			WBP->WidgetTree = Tree;
-		}
 
 		// Optional placement args.
 		FString ParentName;
@@ -133,8 +151,8 @@ namespace
 		bool bAsRoot = false;
 		Args->TryGetBoolField(TEXT("as_root"), bAsRoot);
 
-		// Validate placement before opening transaction.
-		if (bAsRoot && Tree->RootWidget != nullptr)
+		// Validate placement before opening transaction (Tree may be null = empty tree).
+		if (bAsRoot && Tree && Tree->RootWidget != nullptr)
 		{
 			return FAgentMcpToolResult::Error(TEXT("as_root:true but the tree already has a root widget."));
 		}
@@ -142,7 +160,7 @@ namespace
 		UPanelWidget* ParentPanel = nullptr;
 		if (!ParentName.IsEmpty())
 		{
-			UWidget* ParentWidget = Tree->FindWidget(FName(*ParentName));
+			UWidget* ParentWidget = Tree ? Tree->FindWidget(FName(*ParentName)) : nullptr;
 			if (!ParentWidget)
 			{
 				return FAgentMcpToolResult::Error(FString::Printf(
@@ -159,7 +177,7 @@ namespace
 		// If neither as_root nor parent_name, auto-root only when tree is empty.
 		if (!bAsRoot && ParentName.IsEmpty())
 		{
-			if (Tree->RootWidget != nullptr)
+			if (Tree && Tree->RootWidget != nullptr)
 			{
 				return FAgentMcpToolResult::Error(
 					TEXT("parent_name is required when the tree already has a root widget."));
@@ -168,19 +186,25 @@ namespace
 			bAsRoot = true;
 		}
 
-		// Deduplicate name.
+		// Deduplicate name via flat tree lookup (StaticFindObject would misread names
+		// containing path separators — T4 review finding).
 		FName DesiredName(*WidgetName);
 		FName ActualName = DesiredName;
-		if (StaticFindObject(UObject::StaticClass(), Tree, *WidgetName) != nullptr)
+		if (Tree && Tree->FindWidget(DesiredName) != nullptr)
 		{
 			ActualName = MakeUniqueObjectName(Tree, WidgetClass, DesiredName);
 		}
 
 		// Open transaction.
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddWidget", "MCP: Add Widget"));
+		WBP->Modify();
+		if (!Tree)
+		{
+			Tree = NewObject<UWidgetTree>(WBP, NAME_None, RF_Transactional);
+			WBP->WidgetTree = Tree;
+		}
 		Tree->SetFlags(RF_Transactional);
 		Tree->Modify();
-		WBP->Modify();
 
 		// Construct.
 		UWidget* NewWidget = Tree->ConstructWidget<UWidget>(WidgetClass, ActualName);
@@ -374,7 +398,9 @@ namespace
 			return FAgentMcpToolResult::Error(Error);
 		}
 
-		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(WBP);
+		// Value-only change: plain modified is enough — the structural variant triggers a full
+		// skeleton recompile and is reserved for topology changes (T4 review finding).
+		FBlueprintEditorUtils::MarkBlueprintAsModified(WBP);
 
 		// Read back.
 		FString ReadBack, ReadBackType;
