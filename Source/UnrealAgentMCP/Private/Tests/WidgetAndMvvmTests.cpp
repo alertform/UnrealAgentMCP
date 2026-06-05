@@ -636,4 +636,96 @@ bool FMvvmAuthoringTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// ---------------------------------------------------------------------------
+// FMvvmBindingLifecycleTest
+// Verifies list_view_bindings + remove_view_binding round trip. A blank binding
+// row is created directly through the engine subsystem (the tool's own success
+// path needs a FieldNotify VM property, which the engine base class lacks and
+// plugin tests must not depend on the host project's module — the full success
+// path incl. conversion functions is exercised in live E2E).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMvvmBindingLifecycleTest,
+	"UnrealAgentMCP.P5.MvvmBindingLifecycle",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FMvvmBindingLifecycleTest::RunTest(const FString& Parameters)
+{
+	UWidgetBlueprint* WBP = AgentMcpTestUtils::MakeTransientWidgetBlueprint(TEXT("WBP_McpBindingLifecycle"));
+	if (!TestNotNull(TEXT("transient widget blueprint created"), WBP))
+	{
+		return true;
+	}
+	const FString Path = WBP->GetPathName();
+	bool bIsError = false;
+
+	UMVVMEditorSubsystem* Sub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+	if (!TestNotNull(TEXT("MVVM editor subsystem"), Sub))
+	{
+		return true;
+	}
+
+	// Step 1 — empty view: list returns count 0 (view may not even exist yet).
+	{
+		const TSharedPtr<FJsonObject> ListResult = AgentMcpTestUtils::CallTool(*this, TEXT("list_view_bindings"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+		TestFalse(TEXT("list on empty view ok"), bIsError);
+		if (TestNotNull(TEXT("empty list parses"), ListResult.Get()))
+		{
+			TestEqual(TEXT("empty view has 0 bindings"), (int32)ListResult->GetNumberField(TEXT("count")), 0);
+		}
+	}
+
+	// Step 2 — create a blank binding row directly via the engine subsystem.
+	FString BindingIdStr;
+	{
+		Sub->RequestView(WBP);
+		const FMVVMBlueprintViewBinding& Binding = Sub->AddBinding(WBP);
+		BindingIdStr = Binding.BindingId.ToString();
+	}
+
+	// Step 3 — list shows exactly that row.
+	{
+		const TSharedPtr<FJsonObject> ListResult = AgentMcpTestUtils::CallTool(*this, TEXT("list_view_bindings"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+		TestFalse(TEXT("list after add ok"), bIsError);
+		if (TestNotNull(TEXT("list parses"), ListResult.Get()))
+		{
+			TestEqual(TEXT("one binding listed"), (int32)ListResult->GetNumberField(TEXT("count")), 1);
+			const TArray<TSharedPtr<FJsonValue>>& Rows = ListResult->GetArrayField(TEXT("bindings"));
+			if (Rows.Num() == 1 && Rows[0]->AsObject().IsValid())
+			{
+				TestEqual(TEXT("listed id matches"), Rows[0]->AsObject()->GetStringField(TEXT("binding_id")), BindingIdStr);
+			}
+		}
+	}
+
+	// Step 4 — remove with a bogus id: error mentioning list_view_bindings.
+	{
+		const FString Err = AgentMcpTestUtils::CallToolRawText(*this, TEXT("remove_view_binding"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"binding_id\":\"00000000000000000000000000000000\"}"), *Path), bIsError);
+		TestTrue(TEXT("bogus id is error"), bIsError);
+		TestTrue(TEXT("error hints list_view_bindings"), Err.Contains(TEXT("list_view_bindings"), ESearchCase::IgnoreCase));
+	}
+
+	// Step 5 — remove the real row; list returns to 0.
+	{
+		const TSharedPtr<FJsonObject> RemoveResult = AgentMcpTestUtils::CallTool(*this, TEXT("remove_view_binding"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\",\"binding_id\":\"%s\"}"), *Path, *BindingIdStr), bIsError);
+		TestFalse(TEXT("remove ok"), bIsError);
+		if (TestNotNull(TEXT("remove parses"), RemoveResult.Get()))
+		{
+			TestTrue(TEXT("removed:true"), RemoveResult->GetBoolField(TEXT("removed")));
+		}
+
+		const TSharedPtr<FJsonObject> ListResult = AgentMcpTestUtils::CallTool(*this, TEXT("list_view_bindings"),
+			FString::Printf(TEXT("{\"blueprint_path\":\"%s\"}"), *Path), bIsError);
+		TestFalse(TEXT("final list ok"), bIsError);
+		if (TestNotNull(TEXT("final list parses"), ListResult.Get()))
+		{
+			TestEqual(TEXT("0 bindings after remove"), (int32)ListResult->GetNumberField(TEXT("count")), 0);
+		}
+	}
+
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS

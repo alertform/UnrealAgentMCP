@@ -9,6 +9,7 @@
 #include "Kismet2/CompilerResultsLog.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Logging/TokenizedMessage.h"
+#include "MVVMBlueprintFunctionReference.h"
 #include "MVVMBlueprintView.h"
 #include "MVVMBlueprintViewBinding.h"
 #include "MVVMBlueprintViewModelContext.h"
@@ -18,6 +19,7 @@
 #include "Tools/McpToolUtils.h"
 #include "Tools/NodeGraphUtils.h"
 #include "Types/MVVMBindingMode.h"
+#include "Types/MVVMConversionFunctionValue.h"
 #include "Types/MVVMFieldVariant.h"
 #include "WidgetBlueprint.h"
 
@@ -92,6 +94,44 @@ namespace
 		CompileObj->SetNumberField(TEXT("num_warnings"), Results.NumWarnings);
 		CompileObj->SetArrayField(TEXT("messages"), Messages);
 		return CompileObj;
+	}
+
+	/** Reverse of ParseBindingMode, for list_view_bindings. */
+	const TCHAR* BindingModeToToken(EMVVMBindingMode Mode)
+	{
+		switch (Mode)
+		{
+		case EMVVMBindingMode::OneWayToDestination:  return TEXT("one_way");
+		case EMVVMBindingMode::TwoWay:               return TEXT("two_way");
+		case EMVVMBindingMode::OneTimeToDestination: return TEXT("one_time");
+		case EMVVMBindingMode::OneWayToSource:       return TEXT("one_way_to_source");
+		default:                                     return TEXT("unknown");
+		}
+	}
+
+	/**
+	 * First conversion function able to turn ArgType into RetType, preferring "simple"
+	 * single-argument pure functions (what the View Bindings panel surfaces first).
+	 */
+	const UFunction* FindConversionFunction(UMVVMEditorSubsystem* Sub, UWidgetBlueprint* WBP,
+		const FProperty* ArgType, const FProperty* RetType)
+	{
+		const TArray<UE::MVVM::FConversionFunctionValue> Candidates = Sub->GetConversionFunctions(WBP, ArgType, RetType);
+		for (const UE::MVVM::FConversionFunctionValue& Candidate : Candidates)
+		{
+			if (Candidate.IsFunction() && Sub->IsSimpleConversionFunction(Candidate.GetFunction()))
+			{
+				return Candidate.GetFunction();
+			}
+		}
+		for (const UE::MVVM::FConversionFunctionValue& Candidate : Candidates)
+		{
+			if (Candidate.IsFunction())
+			{
+				return Candidate.GetFunction();
+			}
+		}
+		return nullptr;
 	}
 
 	/** Parse binding direction token. */
@@ -434,6 +474,35 @@ namespace
 				*VMPropName, *VMClass->GetName()));
 		}
 
+		// ── Pre-resolve conversion functions for type-mismatched pairs ──────
+		// The binding compiler requires an explicit conversion function when the two
+		// property types differ (e.g. int32 VM property <-> float SpinBox.Value). The
+		// View Bindings panel discovers these interactively; replicate that here —
+		// BEFORE AddBinding, preserving the validate-first invariant.
+		const UFunction* ConvSrcToDst = nullptr;
+		const UFunction* ConvDstToSrc = nullptr;
+		if (VMField && WidgetField && !VMField->SameType(WidgetField))
+		{
+			ConvSrcToDst = FindConversionFunction(Sub, WBP, VMField, WidgetField);
+			if (!ConvSrcToDst)
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Types differ ('%s' is %s, '%s' is %s) and no conversion function was found for %s -> %s."),
+					*VMPropName, *VMField->GetCPPType(), *WidgetPropName, *WidgetField->GetCPPType(),
+					*VMField->GetCPPType(), *WidgetField->GetCPPType()));
+			}
+			if (BindingMode == EMVVMBindingMode::TwoWay)
+			{
+				ConvDstToSrc = FindConversionFunction(Sub, WBP, WidgetField, VMField);
+				if (!ConvDstToSrc)
+				{
+					return FAgentMcpToolResult::Error(FString::Printf(
+						TEXT("two_way binding needs BOTH conversions; none found for %s -> %s (the reverse direction). Use one_way, or add a conversion function."),
+						*WidgetField->GetCPPType(), *VMField->GetCPPType()));
+				}
+			}
+		}
+
 		// ── ALL inputs validated — NOW call AddBinding ──────────────────────
 		// Using validate-first design: we never call AddBinding before this point,
 		// so there is no dangling blank binding to clean up on error.
@@ -502,6 +571,24 @@ namespace
 			}
 		}
 
+		// ── Apply pre-resolved conversion functions ─────────────────────────
+		if (ConvSrcToDst)
+		{
+			if (FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId))
+			{
+				Sub->SetSourceToDestinationConversionFunction(WBP, *BindingPtr,
+					FMVVMBlueprintFunctionReference(WBP, ConvSrcToDst));
+			}
+		}
+		if (ConvDstToSrc)
+		{
+			if (FMVVMBlueprintViewBinding* BindingPtr = View->GetBinding(BindingId))
+			{
+				Sub->SetDestinationToSourceConversionFunction(WBP, *BindingPtr,
+					FMVVMBlueprintFunctionReference(WBP, ConvDstToSrc));
+			}
+		}
+
 		// ── Compile ─────────────────────────────────────────────────────────
 		TSharedRef<FJsonObject> CompileObj = RunCompileAndCollect(WBP);
 
@@ -509,6 +596,98 @@ namespace
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("bound"), true);
 		Result->SetStringField(TEXT("binding_id"), BindingId.ToString());
+		if (ConvSrcToDst) { Result->SetStringField(TEXT("conversion_source_to_dest"), ConvSrcToDst->GetName()); }
+		if (ConvDstToSrc) { Result->SetStringField(TEXT("conversion_dest_to_source"), ConvDstToSrc->GetName()); }
+		Result->SetObjectField(TEXT("compile"), CompileObj);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// list_view_bindings handler
+	// ─────────────────────────────────────────────────────────────────────────
+	FAgentMcpToolResult HandleListViewBindings(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString BlueprintPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath))
+		{
+			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'blueprint_path'."));
+		}
+		FString Error;
+		UWidgetBlueprint* WBP = ResolveWBP(BlueprintPath, Error);
+		if (!WBP)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		UMVVMEditorSubsystem* Sub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+		UMVVMBlueprintView* View = Sub ? Sub->GetView(WBP) : nullptr;
+
+		TArray<TSharedPtr<FJsonValue>> Rows;
+		if (View)
+		{
+			for (const FMVVMBlueprintViewBinding& B : View->GetBindings())
+			{
+				TSharedRef<FJsonObject> Row = MakeShared<FJsonObject>();
+				Row->SetStringField(TEXT("binding_id"), B.BindingId.ToString());
+				Row->SetStringField(TEXT("name"), B.GetDisplayNameString(WBP));
+				Row->SetStringField(TEXT("mode"), BindingModeToToken(B.BindingType));
+				Row->SetBoolField(TEXT("enabled"), B.bEnabled);
+				Row->SetBoolField(TEXT("compile"), B.bCompile);
+				Rows.Add(MakeShared<FJsonValueObject>(Row));
+			}
+		}
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetNumberField(TEXT("count"), Rows.Num());
+		Result->SetArrayField(TEXT("bindings"), Rows);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
+
+	// ─────────────────────────────────────────────────────────────────────────
+	// remove_view_binding handler
+	// ─────────────────────────────────────────────────────────────────────────
+	FAgentMcpToolResult HandleRemoveViewBinding(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString BlueprintPath, BindingIdStr;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("blueprint_path"), BlueprintPath) ||
+			!Args->TryGetStringField(TEXT("binding_id"), BindingIdStr))
+		{
+			return FAgentMcpToolResult::Error(TEXT("remove_view_binding requires blueprint_path and binding_id."));
+		}
+		FString Error;
+		UWidgetBlueprint* WBP = ResolveWBP(BlueprintPath, Error);
+		if (!WBP)
+		{
+			return FAgentMcpToolResult::Error(Error);
+		}
+		FGuid BindingId;
+		if (!FGuid::Parse(BindingIdStr, BindingId))
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("'%s' is not a valid binding GUID."), *BindingIdStr));
+		}
+		UMVVMEditorSubsystem* Sub = GEditor ? GEditor->GetEditorSubsystem<UMVVMEditorSubsystem>() : nullptr;
+		UMVVMBlueprintView* View = Sub ? Sub->GetView(WBP) : nullptr;
+		if (!View)
+		{
+			return FAgentMcpToolResult::Error(TEXT("No MVVM view on this WidgetBlueprint."));
+		}
+		FMVVMBlueprintViewBinding* Binding = View->GetBinding(BindingId);
+		if (!Binding)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Binding '%s' not found. Use list_view_bindings to enumerate."), *BindingIdStr));
+		}
+
+		const FString RemovedName = Binding->GetDisplayNameString(WBP);
+		{
+			const FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "RemoveViewBinding", "MCP: Remove View Binding"));
+			WBP->Modify();
+			View->Modify();
+			View->RemoveBinding(Binding);
+		}
+
+		TSharedRef<FJsonObject> CompileObj = RunCompileAndCollect(WBP);
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("removed"), true);
+		Result->SetStringField(TEXT("name"), RemovedName);
 		Result->SetObjectField(TEXT("compile"), CompileObj);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
@@ -631,6 +810,65 @@ void AgentMcp::Tools::RegisterMvvmTools()
 		}
 		Def.Tier = EAgentMcpTier::SafeWrite;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleAddViewBinding);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// list_view_bindings
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("list_view_bindings");
+		Def.Description = TEXT(
+			"Lists all MVVM view bindings on a WidgetBlueprint: binding_id, display name "
+			"(Widget.Property <- ViewModel.Property), direction, enabled/compile flags. "
+			"Use the binding_id with remove_view_binding. "
+			"Args: blueprint_path (req). Returns {count, bindings:[...]}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> BpPath = MakeShared<FJsonObject>();
+			BpPath->SetStringField(TEXT("type"), TEXT("string"));
+			BpPath->SetStringField(TEXT("description"), TEXT("Absolute asset path to the WidgetBlueprint"));
+			Properties->SetObjectField(TEXT("blueprint_path"), BpPath);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::ReadOnly;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleListViewBindings);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+
+	// remove_view_binding
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("remove_view_binding");
+		Def.Description = TEXT(
+			"Removes one MVVM view binding from a WidgetBlueprint by its binding_id "
+			"(from list_view_bindings or the add_view_binding response). Recompiles and "
+			"reports the result. Args: blueprint_path (req), binding_id (req). "
+			"Returns {removed, name, compile:{...}}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> BpPath = MakeShared<FJsonObject>();
+			BpPath->SetStringField(TEXT("type"), TEXT("string"));
+			BpPath->SetStringField(TEXT("description"), TEXT("Absolute asset path to the WidgetBlueprint"));
+			Properties->SetObjectField(TEXT("blueprint_path"), BpPath);
+			TSharedRef<FJsonObject> BindingId = MakeShared<FJsonObject>();
+			BindingId->SetStringField(TEXT("type"), TEXT("string"));
+			BindingId->SetStringField(TEXT("description"), TEXT("GUID of the binding row to remove"));
+			Properties->SetObjectField(TEXT("binding_id"), BindingId);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("blueprint_path")));
+			Required.Add(MakeShared<FJsonValueString>(TEXT("binding_id")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleRemoveViewBinding);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }
