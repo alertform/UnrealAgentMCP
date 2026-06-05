@@ -30,12 +30,16 @@ This release was specified by **dogfooding**: 1.0 was pointed at real main-menu 
 ## Setup
 
 1. The plugin lives in `Plugins/UnrealAgentMCP`. Build the editor target and launch the editor.
-   Look for `LogAgentMcp: MCP server listening on http://127.0.0.1:17777/mcp` in the Output Log.
+   Look for `LogAgentMcp: MCP server listening on http://127.0.0.1:18777/mcp` in the Output Log.
 2. Connect Claude Code:
    ```
-   claude mcp add --transport http unreal http://127.0.0.1:17777/mcp
+   claude mcp add --transport http unreal http://127.0.0.1:18777/mcp
    ```
 3. Port / auto-start / permission tier are configurable under **Project Settings > Plugins > Unreal Agent MCP**.
+
+> Upgrading from ≤1.1? The default port moved 17777 → 18777 (PIE's game traffic owns UDP 17777
+> and the shared number confused diagnostics). Re-add the connection:
+> `claude mcp remove unreal && claude mcp add --transport http unreal http://127.0.0.1:18777/mcp`
 
 ## Architecture
 
@@ -58,7 +62,7 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 
 ## Security model
 
-- Binds 127.0.0.1 only (engine HTTPServer default — verify with `netstat -an | findstr 17777`).
+- Binds 127.0.0.1 only (engine HTTPServer default — verify with `netstat -an | findstr 18777`).
 - Tier enforcement and the JSONL audit log are **live** (P3a): the ceiling check sits at the one dispatch seam every call passes through; the tier ordering is guarded by a `static_assert`.
 - All write tools run inside editor transactions — every agent edit is Ctrl+Z undoable. Validation failures cancel their transactions (no undo-history noise).
 - Audit entries record a truncated plaintext dump of tool args — don't pass secrets in tool arguments.
@@ -74,7 +78,7 @@ UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAge
 ## Smoke test (curl)
 
 ```powershell
-Invoke-RestMethod -Uri http://127.0.0.1:17777/mcp -Method Post -ContentType "application/json" `
+Invoke-RestMethod -Uri http://127.0.0.1:18777/mcp -Method Post -ContentType "application/json" `
   -Body '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"engine_info"}}'
 ```
 

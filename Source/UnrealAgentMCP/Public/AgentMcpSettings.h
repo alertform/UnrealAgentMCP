@@ -14,9 +14,11 @@ class UNREALAGENTMCP_API UAgentMcpSettings : public UDeveloperSettings
 public:
 	UAgentMcpSettings();
 
-	/** TCP port for the MCP HTTP endpoint. Bound to loopback only. Change requires editor restart. */
+	/** TCP port for the MCP HTTP endpoint. Bound to loopback only. Change requires editor restart.
+	 *  18777: PIE's game traffic defaults to UDP 17777 — sharing the number invited diagnostic
+	 *  confusion (moved in 1.2). */
 	UPROPERTY(EditAnywhere, config, Category = "Server", meta = (ClampMin = "1024", ClampMax = "65535"))
-	int32 Port = 17777;
+	int32 Port = 18777;
 
 	/** Start the MCP server automatically when the editor launches. */
 	UPROPERTY(EditAnywhere, config, Category = "Server")
