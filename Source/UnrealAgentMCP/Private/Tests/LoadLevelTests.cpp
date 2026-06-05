@@ -3,6 +3,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Tests/AgentMcpTestHelpers.h"
+#include "AssetRegistry/AssetRegistryModule.h"
 
 // ---------------------------------------------------------------------------
 // Error-path: non-existent map path -> isError + "not found" in message
@@ -29,17 +30,21 @@ bool FLoadLevelErrorPathTest::RunTest(const FString& Parameters)
 // Happy-path: load a real map -> loaded=true, world name matches, engine_info
 // reflects the new level.
 //
-// NOTE: UEditorLoadingAndSavingUtils::LoadMap triggers a full editor world
-// swap which may not be fully exercisable in the headless -NullRHI automation
-// environment (the call may return null in some engine configurations).
-// If LoadMap returns null the tool will respond with an error; we detect
-// that case and skip the happy-path assertions rather than fake a green.
+// Force a synchronous asset-registry scan before calling load_level so the
+// headless -NullRHI environment has the map registered before the tool's
+// asset-existence check runs.  If LoadMap still fails after the scan the
+// test fails honestly — no soft-skip.
 // ---------------------------------------------------------------------------
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FLoadLevelHappyPathTest,
 	"UnrealAgentMCP.LoadLevel.LoadRealMapAndVerifyCurrentLevel",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
 bool FLoadLevelHappyPathTest::RunTest(const FString& Parameters)
 {
+	// Force the asset registry to finish scanning before the tool's existence check.
+	FAssetRegistryModule& AssetRegistry =
+		FModuleManager::LoadModuleChecked<FAssetRegistryModule>("AssetRegistry");
+	AssetRegistry.Get().ScanPathsSynchronous({ TEXT("/Game/Maps") }, /*bForceRescan*/ true);
+
 	bool bIsError = false;
 
 	// Use the project's main map. The path may vary; try the most likely candidates.
@@ -64,14 +69,13 @@ bool FLoadLevelHappyPathTest::RunTest(const FString& Parameters)
 		}
 	}
 
+	// No soft-skip: if all candidates failed, fail the test with the error information.
+	TestFalse(TEXT("load_level succeeded for at least one candidate path"), UsedPath.IsEmpty());
 	if (UsedPath.IsEmpty())
 	{
-		// LoadMap unavailable in this automation environment — log honestly, skip assertions.
-		UE_LOG(LogTemp, Warning, TEXT("FLoadLevelHappyPathTest: load_level returned an error for all "
-			"candidate paths (LoadMap may be unsupported in -NullRHI headless mode). "
-			"Skipping happy-path assertions — this is NOT a fake green."));
-		AddWarning(TEXT("load_level happy-path skipped: map not found or LoadMap unsupported in headless mode."));
-		return true;
+		AddError(TEXT("load_level returned an error for all candidate paths. "
+			"Check that the map asset exists and that LoadMap works in this configuration."));
+		return false;
 	}
 
 	// loaded == true
