@@ -115,6 +115,59 @@ bool FCreateAnimMontageTest::RunTest(const FString& Parameters)
 		bIsError);
 	TestTrue(TEXT("missing source animation is error"), bIsError);
 
+	// Step 4 — cropped montage: start_time=0.2 / end_time=0.7.
+	constexpr const TCHAR* KCroppedMontagePath = TEXT("/Game/Dev_Test/AM_McpCreateMontageTestCropped");
+	ON_SCOPE_EXIT { CleanupAsset(*this, KCroppedMontagePath); };
+
+	const TSharedPtr<FJsonObject> CropResult = AgentMcpTestUtils::CallTool(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"source_animation\":\"%s\",\"asset_path\":\"%s\",\"start_time\":0.2,\"end_time\":0.7}"),
+			KIdleAnimPath, KCroppedMontagePath),
+		bIsError);
+	TestFalse(TEXT("cropped create_anim_montage succeeds"), bIsError);
+	if (TestNotNull(TEXT("crop result parses"), CropResult.Get()))
+	{
+		TestTrue(TEXT("cropped created:true"), CropResult->GetBoolField(TEXT("created")));
+
+		const double CroppedLength = CropResult->GetNumberField(TEXT("length"));
+		TestTrue(TEXT("cropped length approx 0.5"),
+			FMath::Abs(static_cast<float>(CroppedLength) - 0.5f) < 0.01f);
+
+		const double RetStartTime = CropResult->GetNumberField(TEXT("start_time"));
+		const double RetEndTime   = CropResult->GetNumberField(TEXT("end_time"));
+		TestTrue(TEXT("returned start_time approx 0.2"),
+			FMath::Abs(static_cast<float>(RetStartTime) - 0.2f) < 0.01f);
+		TestTrue(TEXT("returned end_time approx 0.7"),
+			FMath::Abs(static_cast<float>(RetEndTime) - 0.7f) < 0.01f);
+
+		// Verify segment fields on the in-memory asset.
+		UAnimMontage* CroppedMontage = LoadObject<UAnimMontage>(nullptr,
+			*(CropResult->GetStringField(TEXT("asset_path"))));
+		if (TestNotNull(TEXT("cropped montage loads"), CroppedMontage))
+		{
+			TestTrue(TEXT("cropped montage has segment"),
+				CroppedMontage->SlotAnimTracks.Num() > 0 &&
+				CroppedMontage->SlotAnimTracks[0].AnimTrack.AnimSegments.Num() >= 1);
+			if (CroppedMontage->SlotAnimTracks.Num() > 0 &&
+				CroppedMontage->SlotAnimTracks[0].AnimTrack.AnimSegments.Num() >= 1)
+			{
+				const FAnimSegment& Seg = CroppedMontage->SlotAnimTracks[0].AnimTrack.AnimSegments[0];
+				TestTrue(TEXT("segment AnimStartTime approx 0.2"),
+					FMath::Abs(Seg.AnimStartTime - 0.2f) < 0.01f);
+				TestTrue(TEXT("segment AnimEndTime approx 0.7"),
+					FMath::Abs(Seg.AnimEndTime - 0.7f) < 0.01f);
+			}
+		}
+	}
+
+	// Step 5 — error path: end_time <= start_time.
+	const FString BadCropErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"source_animation\":\"%s\",\"asset_path\":\"/Game/Dev_Test/AM_McpBadCrop\",\"start_time\":0.7,\"end_time\":0.2}"),
+			KIdleAnimPath),
+		bIsError);
+	TestTrue(TEXT("end_time <= start_time is error"), bIsError);
+
 	return true;
 }
 

@@ -141,6 +141,34 @@ namespace
 				TEXT("Source animation '%s' has no skeleton. Cannot create a montage without a skeleton."), *SourcePath));
 		}
 
+		// Retrieve and validate optional cropping parameters.
+		const float SourceLength = SourceSeq->GetPlayLength();
+
+		double RawStartTime = 0.0;
+		double RawEndTime   = static_cast<double>(SourceLength);
+		Args->TryGetNumberField(TEXT("start_time"), RawStartTime);
+		Args->TryGetNumberField(TEXT("end_time"),   RawEndTime);
+
+		if (RawStartTime < 0.0)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("'start_time' must be >= 0. Got: %.4f"), RawStartTime));
+		}
+
+		// Clamp end_time to source length (report actual value in response).
+		const bool bEndTimeClamped = RawEndTime > static_cast<double>(SourceLength);
+		const float EffectiveStartTime = static_cast<float>(RawStartTime);
+		const float EffectiveEndTime   = FMath::Clamp(static_cast<float>(RawEndTime), 0.f, SourceLength);
+
+		if (EffectiveEndTime - EffectiveStartTime <= 0.f)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("'end_time' (%.4f) must be greater than 'start_time' (%.4f) after clamping."),
+				EffectiveEndTime, EffectiveStartTime));
+		}
+
+		const float MontageLength = EffectiveEndTime - EffectiveStartTime;
+
 		// Validate / create target package.
 		const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
 
@@ -194,21 +222,21 @@ namespace
 			Montage->SlotAnimTracks[0].SlotName = FName(*SlotName);
 		}
 
-		// Add the segment covering [0, sourceLength].
-		const float SourceLength = SourceSeq->GetPlayLength();
+		// Add a single segment covering [EffectiveStartTime, EffectiveEndTime] of the source.
+		// StartPos=0 anchors the segment to the start of the montage timeline.
 		{
 			FAnimSegment Segment;
 			Segment.SetAnimReference(SourceSeq, true);
-			Segment.AnimStartTime = 0.f;
-			Segment.AnimEndTime = SourceLength;
-			Segment.StartPos = 0.f;
-			Segment.AnimPlayRate = 1.f;
-			Segment.LoopingCount = 1;
+			Segment.AnimStartTime = EffectiveStartTime;
+			Segment.AnimEndTime   = EffectiveEndTime;
+			Segment.StartPos      = 0.f;
+			Segment.AnimPlayRate  = 1.f;
+			Segment.LoopingCount  = 1;
 			Montage->SlotAnimTracks[0].AnimTrack.AnimSegments.Add(Segment);
 		}
 
-		// Set composite length (also updates the common target frame rate internally).
-		Montage->SetCompositeLength(SourceLength);
+		// Set composite length to the cropped duration.
+		Montage->SetCompositeLength(MontageLength);
 
 		// Ensure a default composite section at time 0.
 		if (Montage->CompositeSections.Num() == 0)
@@ -229,8 +257,15 @@ namespace
 		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
 		Result->SetBoolField(TEXT("created"), true);
 		Result->SetStringField(TEXT("asset_path"), Montage->GetPathName());
-		Result->SetNumberField(TEXT("length"), static_cast<double>(SourceLength));
-		Result->SetStringField(TEXT("slot"), SlotName);
+		Result->SetNumberField(TEXT("length"),     static_cast<double>(MontageLength));
+		Result->SetStringField(TEXT("slot"),       SlotName);
+		Result->SetNumberField(TEXT("start_time"), static_cast<double>(EffectiveStartTime));
+		Result->SetNumberField(TEXT("end_time"),   static_cast<double>(EffectiveEndTime));
+		if (bEndTimeClamped)
+		{
+			Result->SetStringField(TEXT("end_time_note"),
+				TEXT("end_time was clamped to source animation length."));
+		}
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
 
@@ -426,9 +461,12 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 		Def.Name = TEXT("create_anim_montage");
 		Def.Description = TEXT(
 			"SafeWrite. Creates a UAnimMontage asset from an existing AnimSequence. "
-			"The montage is skeleton-matched, contains one slot track, and a single segment covering the full source length. "
-			"Returns {created, asset_path, length, slot}. "
-			"Args: source_animation (required, AnimSequence package path), asset_path (required, new montage path), slot_name (optional, default DefaultSlot).");
+			"The montage is skeleton-matched, contains one slot track, and a single segment. "
+			"Optional start_time/end_time crop the segment to a sub-range of the source; omit both to use the full length. "
+			"end_time exceeding the source length is silently clamped. "
+			"Returns {created, asset_path, length, slot, start_time, end_time} (actual effective values). "
+			"Args: source_animation (required), asset_path (required), slot_name (optional, default DefaultSlot), "
+			"start_time (optional float seconds, default 0), end_time (optional float seconds, default source length).");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
@@ -448,6 +486,19 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 			SlotProp->SetStringField(TEXT("type"), TEXT("string"));
 			SlotProp->SetStringField(TEXT("description"), TEXT("Slot name for the track (default DefaultSlot)."));
 			Props->SetObjectField(TEXT("slot_name"), SlotProp);
+
+			TSharedRef<FJsonObject> StartTimeProp = MakeShared<FJsonObject>();
+			StartTimeProp->SetStringField(TEXT("type"), TEXT("number"));
+			StartTimeProp->SetStringField(TEXT("description"),
+				TEXT("Start time in seconds within the source animation (default 0). Must be >= 0."));
+			Props->SetObjectField(TEXT("start_time"), StartTimeProp);
+
+			TSharedRef<FJsonObject> EndTimeProp = MakeShared<FJsonObject>();
+			EndTimeProp->SetStringField(TEXT("type"), TEXT("number"));
+			EndTimeProp->SetStringField(TEXT("description"),
+				TEXT("End time in seconds within the source animation (default = full source length). "
+				     "Values exceeding the source length are clamped. Must be > start_time."));
+			Props->SetObjectField(TEXT("end_time"), EndTimeProp);
 
 			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
 
