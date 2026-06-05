@@ -1,5 +1,8 @@
 #include "Tools/EditorSessionTools.h"
 
+#include "AssetRegistry/AssetData.h"
+#include "AssetRegistry/AssetRegistryModule.h"
+#include "AssetRegistry/IAssetRegistry.h"
 #include "Containers/UnrealString.h"
 #include "Core/AgentMcpAuditLog.h"
 #include "Core/AgentMcpLogCapture.h"
@@ -9,7 +12,9 @@
 #include "Dom/JsonValue.h"
 #include "Editor.h"
 #include "FileHelpers.h"
+#include "Misc/PackageName.h"
 #include "Misc/Paths.h"
+#include "Modules/ModuleManager.h"
 #include "Tools/McpToolUtils.h"
 #include "UnrealClient.h"
 
@@ -176,6 +181,104 @@ namespace
 		Result->SetArrayField(TEXT("content"), ContentNames);
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
 	}
+
+	FAgentMcpToolResult HandleLoadLevel(const TSharedPtr<FJsonObject>& Args)
+	{
+		FString MapPath;
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("map_path"), MapPath) || MapPath.TrimStartAndEnd().IsEmpty())
+		{
+			return FAgentMcpToolResult::Error(TEXT("load_level requires a non-empty 'map_path' string (e.g. /Game/Maps/ThirdPersonMap)."));
+		}
+
+		// Normalise: strip the trailing .MapName suffix if the caller passed the long form (e.g. /Game/X/Map.Map).
+		// Asset registry always stores the package name without the object suffix.
+		{
+			int32 DotIdx;
+			if (MapPath.FindLastChar(TEXT('.'), DotIdx))
+			{
+				MapPath = MapPath.Left(DotIdx);
+			}
+		}
+
+		// --- Step 1: Confirm the asset exists in the registry and is a World. ---
+		FAssetRegistryModule& RegistryMod = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry"));
+		IAssetRegistry& AR = RegistryMod.Get();
+		AR.WaitForCompletion();
+
+		FAssetData AssetData = AR.GetAssetByObjectPath(FSoftObjectPath(MapPath + TEXT(".") + FPackageName::GetShortName(MapPath)));
+		if (!AssetData.IsValid())
+		{
+			// Fallback: some registry versions need the package name directly.
+			TArray<FAssetData> Found;
+			AR.GetAssetsByPackageName(FName(*MapPath), Found);
+			if (Found.Num() > 0)
+			{
+				AssetData = Found[0];
+			}
+		}
+
+		if (!AssetData.IsValid())
+		{
+			return FAgentMcpToolResult::Error(
+				FString::Printf(TEXT("Map not found: '%s'. Use list_assets or search_assets to discover maps."), *MapPath));
+		}
+
+		// Verify the asset class is World.
+		const FString AssetClassName = AssetData.AssetClassPath.GetAssetName().ToString();
+		if (AssetClassName != TEXT("World"))
+		{
+			return FAgentMcpToolResult::Error(
+				FString::Printf(TEXT("Asset '%s' is a '%s', not a World. Provide a map (World) asset path."), *MapPath, *AssetClassName));
+		}
+
+		// --- Step 2: Dirty-package guard. Never trigger a save dialog (unattended would hang). ---
+		{
+			TArray<UPackage*> DirtyMaps;
+			TArray<UPackage*> DirtyContent;
+			UEditorLoadingAndSavingUtils::GetDirtyMapPackages(DirtyMaps);
+			UEditorLoadingAndSavingUtils::GetDirtyContentPackages(DirtyContent);
+
+			TArray<FString> DirtyNames;
+			for (UPackage* Pkg : DirtyMaps)
+			{
+				if (IsValid(Pkg)) DirtyNames.Add(Pkg->GetName());
+			}
+			for (UPackage* Pkg : DirtyContent)
+			{
+				if (IsValid(Pkg)) DirtyNames.Add(Pkg->GetName());
+			}
+
+			if (DirtyNames.Num() > 0)
+			{
+				FString DirtyList;
+				for (const FString& Name : DirtyNames)
+				{
+					DirtyList += TEXT("  ") + Name + TEXT("\n");
+				}
+				return FAgentMcpToolResult::Error(
+					FString::Printf(TEXT("Cannot load map: %d unsaved package(s) detected. Save via save_asset first:\n%s"),
+						DirtyNames.Num(), *DirtyList));
+			}
+		}
+
+		// --- Step 3: Load the map. LoadMap is a global editor operation and is NOT undoable. ---
+		if (!GEditor)
+		{
+			return FAgentMcpToolResult::Error(TEXT("GEditor unavailable (not running inside the editor)."));
+		}
+
+		UWorld* NewWorld = UEditorLoadingAndSavingUtils::LoadMap(MapPath);
+		if (!NewWorld)
+		{
+			return FAgentMcpToolResult::Error(
+				FString::Printf(TEXT("LoadMap returned null for '%s'. The file may be corrupted or on a read-only mount."), *MapPath));
+		}
+
+		TSharedRef<FJsonObject> Result = MakeShared<FJsonObject>();
+		Result->SetBoolField(TEXT("loaded"), true);
+		Result->SetStringField(TEXT("world"), NewWorld->GetOutermost()->GetName());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Result));
+	}
 }
 
 void AgentMcp::Tools::RegisterEditorSessionTools()
@@ -296,6 +399,32 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());
 		Def.Tier = EAgentMcpTier::ReadOnly;
 		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleListDirtyPackages);
+		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
+	}
+	{
+		FAgentMcpToolDef Def;
+		Def.Name = TEXT("load_level");
+		Def.Description = TEXT("Loads a map (World asset) into the editor as the active level. "
+			"Accepts both package form (/Game/Maps/ThirdPersonMap) and object-path form (/Game/Maps/ThirdPersonMap.ThirdPersonMap). "
+			"Validates the asset exists and is a World before loading. "
+			"Aborts with an error listing all dirty packages if any unsaved maps or content exist — save via save_asset first. "
+			"NOTE: this is a global editor operation (equivalent to File > Open Level) and is NOT undoable. "
+			"Returns {loaded: true, world: \"<package name>\"}.");
+		Def.InputSchema = MakeShared<FJsonObject>();
+		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
+		{
+			TSharedRef<FJsonObject> Properties = MakeShared<FJsonObject>();
+			TSharedRef<FJsonObject> MapPathProp = MakeShared<FJsonObject>();
+			MapPathProp->SetStringField(TEXT("type"), TEXT("string"));
+			MapPathProp->SetStringField(TEXT("description"), TEXT("Package path of the map to load, e.g. /Game/Maps/ThirdPersonMap. Also accepts the full object path with suffix."));
+			Properties->SetObjectField(TEXT("map_path"), MapPathProp);
+			Def.InputSchema->SetObjectField(TEXT("properties"), Properties);
+			TArray<TSharedPtr<FJsonValue>> Required;
+			Required.Add(MakeShared<FJsonValueString>(TEXT("map_path")));
+			Def.InputSchema->SetArrayField(TEXT("required"), Required);
+		}
+		Def.Tier = EAgentMcpTier::SafeWrite;
+		Def.Handler = FAgentMcpToolHandler::CreateStatic(&HandleLoadLevel);
 		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
 	}
 }

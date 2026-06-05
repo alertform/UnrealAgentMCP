@@ -3,6 +3,7 @@
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
+#include "Editor.h"
 #include "Misc/App.h"
 #include "Misc/EngineVersion.h"
 #include "Tools/McpToolUtils.h"
@@ -16,6 +17,19 @@ namespace
 		Info->SetStringField(TEXT("project_name"), FApp::GetProjectName());
 		Info->SetStringField(TEXT("plugin_version"), AgentMcp::PluginVersion);
 		Info->SetBoolField(TEXT("is_editor"), GIsEditor);
+
+		// Report the currently loaded map package name (empty string when no world is loaded).
+		FString CurrentLevel;
+		if (GEditor)
+		{
+			UWorld* World = GEditor->GetEditorWorldContext().World();
+			if (World)
+			{
+				CurrentLevel = World->GetOutermost()->GetName();
+			}
+		}
+		Info->SetStringField(TEXT("current_level"), CurrentLevel);
+
 		return FAgentMcpToolResult::Success(AgentMcp::ToolUtils::SerializeObject(Info));
 	}
 }
