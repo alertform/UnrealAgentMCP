@@ -349,11 +349,14 @@ namespace
 					FString::Printf(TEXT("'%s' is a map package but no UWorld object was found inside it."), *PackageName));
 			}
 
+			// NOTE: SaveMap may trigger FMessageDialog in edge cases (read-only file, source-control
+			// lock, or level-name conflict). Under -unattended this dialog is NOT suppressed and will
+			// block. These are known edge cases; the normal path (writable, unlocked map) is dialog-free.
 			const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(World, PackageName);
 			if (!bSaved)
 			{
 				return FAgentMcpToolResult::Error(
-					FString::Printf(TEXT("SaveMap returned false for '%s'. The map may be read-only or locked by source control."), *PackageName));
+					FString::Printf(TEXT("SaveMap returned false for '%s'. Possible causes: file is read-only, locked by source control, or there is a level-name conflict."), *PackageName));
 			}
 
 			TSharedRef<FJsonObject> MapResult = MakeShared<FJsonObject>();

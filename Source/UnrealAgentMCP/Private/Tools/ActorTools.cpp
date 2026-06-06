@@ -291,7 +291,11 @@ namespace
 			// WorldSettings is opt-in: only returned when the caller explicitly requests system actors.
 			if (Actor->IsA<AWorldSettings>() && !bIncludeSystem) { continue; }
 
-			// Class filter: prefer IsA (exact hierarchy) when the class resolved, else substring match.
+			// Class filter:
+			//   FilterClass resolved  → strict IsA only (no substring fallback; avoids false positives
+			//                           when an unrelated class name happens to contain ClassName).
+			//   FilterClass == nullptr → class string was unrecognised; fall back to substring match
+			//                           on the actor's class name chain as a best-effort heuristic.
 			if (!ClassName.IsEmpty())
 			{
 				bool bClassMatch = false;
@@ -299,9 +303,9 @@ namespace
 				{
 					bClassMatch = Actor->IsA(FilterClass);
 				}
-				if (!bClassMatch)
+				else
 				{
-					// Substring fallback: check the actor's native class name chain for ClassName.
+					// Substring fallback: only reached when FilterClass failed to resolve.
 					for (UClass* C = Actor->GetClass(); C; C = C->GetSuperClass())
 					{
 						if (C->GetName().Contains(ClassName, ESearchCase::IgnoreCase))

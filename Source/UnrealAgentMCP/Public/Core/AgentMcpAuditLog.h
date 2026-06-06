@@ -14,7 +14,8 @@ struct FAgentMcpAuditEntry
 	bool bIsError = false;
 	bool bRejectedByTier = false;
 	double DurationMs = 0.0;
-	/** Error text (truncated to 300 chars). Only meaningful when bIsError=true. */
+	/** Full error text. Truncated to 300 chars when written to the audit file (truncation happens in
+	 *  FAgentMcpAuditLog::Append, not here). Only meaningful when bIsError=true. */
 	FString ErrorText;
 };
 

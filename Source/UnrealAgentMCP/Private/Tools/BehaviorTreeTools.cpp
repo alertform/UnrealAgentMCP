@@ -179,13 +179,18 @@ namespace
 		if (KeyID == FBlackboard::InvalidKey)
 		{
 			// Build available-keys list for the error message.
+			// Walk the full inheritance chain (BB->Parent) so inherited keys are listed too —
+			// GetKeyID already searches parents, so the error message must match its search space.
 			FString Available;
-			for (const FBlackboardEntry& Entry : BBAsset->Keys)
+			for (UBlackboardData* BB = BBAsset; BB != nullptr; BB = BB->Parent)
 			{
-				Available += (Available.IsEmpty() ? TEXT("") : TEXT(", ")) + Entry.EntryName.ToString();
+				for (const FBlackboardEntry& Entry : BB->Keys)
+				{
+					Available += (Available.IsEmpty() ? TEXT("") : TEXT(", ")) + Entry.EntryName.ToString();
+				}
 			}
 			OutError = FString::Printf(
-				TEXT("Blackboard key '%s' not found in '%s'. Available keys: [%s]."),
+				TEXT("Blackboard key '%s' not found in '%s' (including parent BBs). Available keys: [%s]."),
 				*KeyName, *BBAsset->GetName(), *Available);
 			return false;
 		}
@@ -257,14 +262,16 @@ namespace
 	// Build the index_path string for a node
 	// -------------------------------------------------------------------------
 
-	FString BuildIndexPath(UBTCompositeNode* Parent, int32 ChildIdx)
+	// Build the full slash-separated index_path for a newly inserted child.
+	// ParentIndexPath is the resolved path of the parent composite ("" for root, "0", "0/1", etc.).
+	// The result is directly usable in subsequent add_bt_node / add_bt_decorator calls.
+	FString BuildIndexPath(const FString& ParentIndexPath, int32 ChildIdx)
 	{
-		// Climb the tree to build a slash-separated path.
-		// For simplicity, return the leaf index — a full path requires parent tracking.
-		// Since the engine stores parent pointers (UBTNode::GetParentNode isn't public runtime API),
-		// we just return the single child index as the new node's relative identity.
-		// Full paths only matter for multi-level navigation; single-level add always gets "N".
-		return FString::FromInt(ChildIdx);
+		if (ParentIndexPath.IsEmpty())
+		{
+			return FString::FromInt(ChildIdx);
+		}
+		return ParentIndexPath + TEXT("/") + FString::FromInt(ChildIdx);
 	}
 
 	// -------------------------------------------------------------------------
@@ -504,6 +511,13 @@ namespace
 		if (!ParentComposite)
 		{
 			// Set as root node (Composite only — already validated above by path routing).
+			// Guard: refuse to silently replace an existing root and orphan the old tree.
+			if (BT->RootNode != nullptr)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(
+					TEXT("BehaviorTree already has a RootNode; pass a parent_index_path to add children."));
+			}
 			BT->RootNode = Cast<UBTCompositeNode>(NewNode);
 			NewIndexPath = TEXT("");
 		}
@@ -511,6 +525,15 @@ namespace
 		{
 			// Insert as child of ParentComposite.
 			ParentComposite->Modify();
+
+			// UBTService nodes attach to a composite's Services array, not Children.
+			// Reject early to avoid adding a null-pointer child slot.
+			if (NodeClass->IsChildOf(UBTService::StaticClass()))
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(
+					TEXT("UBTService nodes attach to a composite's Services array, not Children; service support is not implemented yet."));
+			}
 
 			FBTCompositeChild ChildEntry;
 			if (NodeClass->IsChildOf(UBTCompositeNode::StaticClass()))
@@ -522,15 +545,25 @@ namespace
 				ChildEntry.ChildTask = Cast<UBTTaskNode>(NewNode);
 			}
 
+			// Defensive: if both pointers are null (unknown future subclass slipped through),
+			// cancel the transaction rather than silently adding an empty slot.
+			if (!ChildEntry.ChildComposite && !ChildEntry.ChildTask)
+			{
+				Transaction.Cancel();
+				return FAgentMcpToolResult::Error(
+					FString::Printf(TEXT("Class '%s' is not a Composite or Task node and cannot be added as a BT child."),
+						*NodeClass->GetName()));
+			}
+
 			if (InsertIndex >= 0 && InsertIndex < ParentComposite->Children.Num())
 			{
 				ParentComposite->Children.Insert(ChildEntry, InsertIndex);
-				NewIndexPath = BuildIndexPath(ParentComposite, InsertIndex);
+				NewIndexPath = BuildIndexPath(ParentIndexPath, InsertIndex);
 			}
 			else
 			{
 				const int32 AppendIdx = ParentComposite->Children.Add(ChildEntry);
-				NewIndexPath = BuildIndexPath(ParentComposite, AppendIdx);
+				NewIndexPath = BuildIndexPath(ParentIndexPath, AppendIdx);
 			}
 		}
 
