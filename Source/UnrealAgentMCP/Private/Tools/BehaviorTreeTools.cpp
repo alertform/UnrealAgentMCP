@@ -361,6 +361,81 @@ namespace
 	}
 
 	// -------------------------------------------------------------------------
+	// Outer normalization helper
+	//
+	// Problem: BTs authored in the editor store their runtime-node Outers under the
+	// editor graph sub-tree (BTGraph → UBehaviorTreeGraphNode → NodeInstance).
+	// When we null out BTGraph the memory references remain valid (read_bt works),
+	// but SavePackage walks the Outer chain to decide what belongs to the package:
+	// any node whose Outer chain does NOT lead back to the UBehaviorTree asset is
+	// silently dropped on save.  The result is a truncated .uasset (e.g. 10 KB
+	// instead of 12 KB) and a "has missing decorator node" error on reload.
+	//
+	// Fix: before any write, recursively traverse the live runtime tree and Rename
+	// every node whose Outer != BT to use BT as the new Outer.
+	//
+	// Rename notes:
+	//   - nullptr name → keep existing object name (engine auto-renames on conflict).
+	//   - REN_DontCreateRedirectors: we don't want leftover soft-reference redirectors.
+	//   - REN_NonTransactional: the rename itself is NOT undoable.  We call this after
+	//     BT->Modify() so the undo record for the BT exists; but the individual Rename
+	//     ops are excluded from undo.  On Undo the node data reverts (Modify captured
+	//     the serialized state) but the Outer pointer may not be restored — this is
+	//     acceptable because in practice undo restores the entire BT state from the
+	//     pre-Modify snapshot, which already had the old (broken) Outer.  The nodes
+	//     remain accessible from the reverted snapshot regardless.
+	// -------------------------------------------------------------------------
+
+	void NormalizeBTNodeOuters(UBehaviorTree* BT, UBTCompositeNode* Composite)
+	{
+		if (!Composite) { return; }
+
+		auto FixOuter = [BT](UBTNode* Node)
+		{
+			if (Node && Node->GetOuter() != BT)
+			{
+				Node->Rename(nullptr, BT, REN_DontCreateRedirectors | REN_NonTransactional);
+			}
+		};
+
+		// Fix the composite itself.
+		FixOuter(Composite);
+
+		// Fix services on this composite.
+		for (UBTService* Svc : Composite->Services)
+		{
+			FixOuter(Svc);
+		}
+
+		// Recurse into children.
+		for (FBTCompositeChild& Child : Composite->Children)
+		{
+			// Fix decorators on the child connection.
+			for (UBTDecorator* Dec : Child.Decorators)
+			{
+				FixOuter(Dec);
+			}
+
+			if (Child.ChildComposite)
+			{
+				NormalizeBTNodeOuters(BT, Child.ChildComposite);
+			}
+			else if (Child.ChildTask)
+			{
+				FixOuter(Child.ChildTask);
+			}
+		}
+	}
+
+	/** Entry point: normalizes all runtime nodes in BT to have BT as their Outer.
+	 *  Call after BT->Modify() and before any structural edits + INVALIDATE_BT_GRAPH. */
+	void NormalizeBTNodeOuters(UBehaviorTree* BT)
+	{
+		if (!BT || !BT->RootNode) { return; }
+		NormalizeBTNodeOuters(BT, BT->RootNode);
+	}
+
+	// -------------------------------------------------------------------------
 	// Tool handlers
 	// -------------------------------------------------------------------------
 
@@ -489,6 +564,12 @@ namespace
 
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddBTNode", "MCP: Add BT Node"));
 		BT->Modify();
+
+		// Normalize existing runtime-node Outers BEFORE any edits.
+		// Editor-authored BTs store node Outers under the BTGraph sub-tree; when we
+		// null BTGraph those nodes' Outer chains no longer lead back to the BT package,
+		// so SavePackage silently drops the whole sub-tree.  Rename them to BT first.
+		NormalizeBTNodeOuters(BT);
 
 		// Create the node with BT as outer (matches engine convention).
 		UBTNode* NewNode = NewObject<UBTNode>(BT, NodeClass, NAME_None, RF_Transactional);
@@ -649,6 +730,10 @@ namespace
 
 		FScopedTransaction Transaction(NSLOCTEXT("AgentMcp", "AddBTDecorator", "MCP: Add BT Decorator"));
 		BT->Modify();
+
+		// Normalize existing runtime-node Outers BEFORE any edits (same reason as add_bt_node).
+		NormalizeBTNodeOuters(BT);
+
 		ParentComposite->Modify();
 
 		UBTDecorator* NewDecorator = NewObject<UBTDecorator>(BT, DecClass, NAME_None, RF_Transactional);
