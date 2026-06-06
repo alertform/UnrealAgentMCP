@@ -262,14 +262,14 @@ namespace
 		}
 
 		// Optional class filter.
+		// Strategy: resolve ClassName to a UClass for IsChildOf matching; if resolution fails,
+		// fall back to case-insensitive substring match against each actor's class name.
+		// Zero hits always returns an empty list — never silently falls back to the full set.
 		UClass* FilterClass = nullptr;
 		if (!ClassName.IsEmpty())
 		{
 			FilterClass = UClass::TryFindTypeSlow<UClass>(ClassName);
-			if (!FilterClass)
-			{
-				return FAgentMcpToolResult::Error(FString::Printf(TEXT("class_name '%s' not found."), *ClassName));
-			}
+			// Note: a null FilterClass is NOT an error here — we fall back to substring matching below.
 		}
 
 		FString Error;
@@ -290,16 +290,46 @@ namespace
 			if (Actor->IsA<ALevelScriptActor>()) { continue; }
 			// WorldSettings is opt-in: only returned when the caller explicitly requests system actors.
 			if (Actor->IsA<AWorldSettings>() && !bIncludeSystem) { continue; }
-			if (FilterClass && !Actor->IsA(FilterClass)) { continue; }
+
+			// Class filter: prefer IsA (exact hierarchy) when the class resolved, else substring match.
+			if (!ClassName.IsEmpty())
+			{
+				bool bClassMatch = false;
+				if (FilterClass)
+				{
+					bClassMatch = Actor->IsA(FilterClass);
+				}
+				if (!bClassMatch)
+				{
+					// Substring fallback: check the actor's native class name chain for ClassName.
+					for (UClass* C = Actor->GetClass(); C; C = C->GetSuperClass())
+					{
+						if (C->GetName().Contains(ClassName, ESearchCase::IgnoreCase))
+						{
+							bClassMatch = true;
+							break;
+						}
+					}
+				}
+				if (!bClassMatch) { continue; }
+			}
+
 			if (!LabelContains.IsEmpty() && !Actor->GetActorLabel().Contains(LabelContains, ESearchCase::IgnoreCase)) { continue; }
 
 			++Total;
 			if (ActorArray.Num() < Limit)
 			{
+				const FVector Loc = Actor->GetActorLocation();
+				TSharedRef<FJsonObject> LocObj = MakeShared<FJsonObject>();
+				LocObj->SetNumberField(TEXT("x"), Loc.X);
+				LocObj->SetNumberField(TEXT("y"), Loc.Y);
+				LocObj->SetNumberField(TEXT("z"), Loc.Z);
+
 				TSharedRef<FJsonObject> Entry = MakeShared<FJsonObject>();
 				Entry->SetStringField(TEXT("label"), Actor->GetActorLabel());
 				Entry->SetStringField(TEXT("actor_path"), Actor->GetPathName());
 				Entry->SetStringField(TEXT("class"), Actor->GetClass()->GetName());
+				Entry->SetObjectField(TEXT("location"), LocObj);
 				ActorArray.Add(MakeShared<FJsonValueObject>(Entry));
 			}
 		}
@@ -485,7 +515,7 @@ void AgentMcp::Tools::RegisterActorTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("query_actors");
-		Def.Description = TEXT("Lists actors in the editor world with optional class and label filters. Returns {total, returned, actors:[{label, actor_path, class}]}. actor_path values are valid inputs for set_actor_transform, set_actor_property, and destroy_actor. include_system (optional bool): include the WorldSettings actor, e.g. to set DefaultGameMode (GameMode Override). Level-script actors are never returned.");
+		Def.Description = TEXT("Lists actors in the editor world with optional class and label filters. Returns {total, returned, actors:[{label, actor_path, class, location:{x,y,z}}]}. class_name filter uses IsA hierarchy first, then case-insensitive substring match on class name chain; zero matches returns an empty list. actor_path values are valid inputs for set_actor_transform, set_actor_property, and destroy_actor. include_system (optional bool): include the WorldSettings actor, e.g. to set DefaultGameMode (GameMode Override). Level-script actors are never returned.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
@@ -493,7 +523,7 @@ void AgentMcp::Tools::RegisterActorTools()
 
 			TSharedRef<FJsonObject> ClassProp = MakeShared<FJsonObject>();
 			ClassProp->SetStringField(TEXT("type"), TEXT("string"));
-			ClassProp->SetStringField(TEXT("description"), TEXT("Optional class filter; only actors of this type (or subclass) are returned."));
+			ClassProp->SetStringField(TEXT("description"), TEXT("Optional class filter. Uses IsA hierarchy match first, then case-insensitive substring match on class name chain. Zero matches returns an empty list (never falls back to full set)."));
 			Props->SetObjectField(TEXT("class_name"), ClassProp);
 
 			TSharedRef<FJsonObject> LabelProp = MakeShared<FJsonObject>();

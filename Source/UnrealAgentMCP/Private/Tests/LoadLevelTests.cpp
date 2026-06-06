@@ -47,10 +47,9 @@ bool FLoadLevelHappyPathTest::RunTest(const FString& Parameters)
 
 	bool bIsError = false;
 
-	// Use the project's main map. The path may vary; try the most likely candidates.
+	// Use the project's main map (lives under /Game/Maps/).
 	const TArray<FString> CandidatePaths = {
 		TEXT("/Game/Maps/ThirdPersonMap"),
-		TEXT("/Game/ThirdPerson/Maps/ThirdPersonMap"),
 	};
 
 	FString UsedPath;

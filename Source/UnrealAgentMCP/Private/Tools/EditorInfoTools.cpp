@@ -38,7 +38,7 @@ void AgentMcp::Tools::RegisterEditorInfoTools()
 {
 	FAgentMcpToolDef Def;
 	Def.Name = TEXT("engine_info");
-	Def.Description = TEXT("Returns Unreal Engine version, project name and plugin version. Use to verify the connection works.");
+	Def.Description = TEXT("Returns Unreal Engine version, project name, plugin version, and current_level (outermost package name of the active World, empty string when no world is loaded). Use to verify the connection works.");
 	Def.InputSchema = MakeShared<FJsonObject>();
 	Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 	Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());

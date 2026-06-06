@@ -37,6 +37,10 @@ void FAgentMcpAuditLog::Append(const FAgentMcpAuditEntry& Entry)
 	// secrets in tool args unless you accept them landing in this plaintext audit file.
 	Json->SetStringField(TEXT("args"), Entry.ArgsDigest);
 	Json->SetBoolField(TEXT("is_error"), Entry.bIsError);
+	if (Entry.bIsError && !Entry.ErrorText.IsEmpty())
+	{
+		Json->SetStringField(TEXT("error"), Entry.ErrorText.Left(300));
+	}
 	Json->SetBoolField(TEXT("rejected_by_tier"), Entry.bRejectedByTier);
 	Json->SetNumberField(TEXT("duration_ms"), Entry.DurationMs);
 

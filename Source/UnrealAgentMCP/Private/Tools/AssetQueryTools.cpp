@@ -16,6 +16,7 @@
 #include "Modules/ModuleManager.h"
 #include "Subsystems/EditorAssetSubsystem.h"
 #include "Tools/McpToolUtils.h"
+#include "Engine/World.h"
 #include "UObject/Package.h"
 
 namespace
@@ -327,13 +328,38 @@ namespace
 				FString::Printf(TEXT("Package '%s' is not loaded. Load or create the asset first, e.g. via create_blueprint."), *PackageName));
 		}
 
-		// Map/level packages are out of scope: saving the open level through an "asset" tool is a
-		// surprising side effect, and levels (external actors, world partition) belong to the
-		// editor's own save flow.
+		// Map packages: use UEditorLoadingAndSavingUtils::SaveMap (headless-safe, no dialog).
 		if (Package->ContainsMap())
 		{
-			return FAgentMcpToolResult::Error(
-				FString::Printf(TEXT("'%s' is a map package; save levels through the editor's Save Level flow, not save_asset."), *PackageName));
+			// Find the UWorld object inside this package.
+			UWorld* World = nullptr;
+			ForEachObjectWithPackage(Package, [&World](UObject* Obj) -> bool
+			{
+				if (UWorld* W = Cast<UWorld>(Obj))
+				{
+					World = W;
+					return false; // stop iteration
+				}
+				return true;
+			}, /*bIncludeNestedObjects=*/false);
+
+			if (!World)
+			{
+				return FAgentMcpToolResult::Error(
+					FString::Printf(TEXT("'%s' is a map package but no UWorld object was found inside it."), *PackageName));
+			}
+
+			const bool bSaved = UEditorLoadingAndSavingUtils::SaveMap(World, PackageName);
+			if (!bSaved)
+			{
+				return FAgentMcpToolResult::Error(
+					FString::Printf(TEXT("SaveMap returned false for '%s'. The map may be read-only or locked by source control."), *PackageName));
+			}
+
+			TSharedRef<FJsonObject> MapResult = MakeShared<FJsonObject>();
+			MapResult->SetBoolField(TEXT("saved"), true);
+			MapResult->SetStringField(TEXT("package"), PackageName);
+			return FAgentMcpToolResult::Success(AgentMcp::ToolUtils::SerializeObject(MapResult));
 		}
 
 		// Mark dirty so SavePackages with bOnlyDirty=false still writes it reliably.
@@ -570,7 +596,7 @@ void AgentMcp::Tools::RegisterAssetQueryTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("save_asset");
-		Def.Description = TEXT("WRITES the .uasset to disk under Content/ — the asset becomes part of the project. The package must already be loaded (e.g. after create_blueprint). Returns {saved:true, package}.");
+		Def.Description = TEXT("WRITES the .uasset (or .umap) to disk under Content/ — the asset becomes part of the project. The package must already be loaded (e.g. after create_blueprint or load_level). Map packages are saved via UEditorLoadingAndSavingUtils::SaveMap (headless-safe, no dialog). Returns {saved:true, package}.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{

@@ -393,7 +393,7 @@ void AgentMcp::Tools::RegisterEditorSessionTools()
 	{
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("list_dirty_packages");
-		Def.Description = TEXT("Lists unsaved (dirty) packages — maps and content separately. Call before closing the editor or after a batch of edits to know what needs persisting. Content packages: save via save_asset. Map packages: must be saved in-editor (File > Save) — save_asset refuses them by design.");
+		Def.Description = TEXT("Lists unsaved (dirty) packages — maps and content separately. Call before closing the editor or after a batch of edits to know what needs persisting. Both content and map packages can be saved via save_asset.");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		Def.InputSchema->SetObjectField(TEXT("properties"), MakeShared<FJsonObject>());

@@ -46,14 +46,14 @@ namespace
 {
 	void CleanupAsset(FAutomationTestBase& Test, const FString& Path)
 	{
-		// Raise ceiling to Destructive for cleanup then restore.
+		// Raise ceiling to Destructive for cleanup then restore (exception-safe via ON_SCOPE_EXIT).
 		UAgentMcpSettings* Settings = GetMutableDefault<UAgentMcpSettings>();
 		const EAgentMcpTier Saved = Settings->PermissionTier;
 		Settings->PermissionTier = EAgentMcpTier::Destructive;
+		ON_SCOPE_EXIT { Settings->PermissionTier = Saved; };
 		bool bErr = false;
 		AgentMcpTestUtils::CallTool(Test, TEXT("delete_asset"),
 			FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *Path), bErr);
-		Settings->PermissionTier = Saved;
 	}
 }
 

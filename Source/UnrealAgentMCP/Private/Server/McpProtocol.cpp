@@ -169,6 +169,9 @@ namespace
 			Rejection.ArgsDigest = MakeArgsDigest(Args);
 			Rejection.bIsError = true;
 			Rejection.bRejectedByTier = true;
+			Rejection.ErrorText = FString::Printf(
+				TEXT("Tool '%s' requires tier '%s' but ceiling is '%s'."),
+				*ToolName, AgentMcp::TierToString(Tool->Tier), AgentMcp::TierToString(Settings->PermissionTier));
 			FAgentMcpAuditLog::Get().Append(Rejection);
 			UE_LOG(LogAgentMcp, Warning, TEXT("tools/call %s rejected: tier %s exceeds ceiling %s"),
 				*ToolName, AgentMcp::TierToString(Tool->Tier), AgentMcp::TierToString(Settings->PermissionTier));
@@ -202,6 +205,10 @@ namespace
 		Audit.ArgsDigest = MakeArgsDigest(Args);
 		Audit.bIsError = ToolResult.bIsError;
 		Audit.DurationMs = ElapsedMs;
+		if (ToolResult.bIsError)
+		{
+			Audit.ErrorText = ToolResult.Text;
+		}
 		FAgentMcpAuditLog::Get().Append(Audit);
 
 		return MakeToolResultResponse(Id, ToolResult);

@@ -14,6 +14,8 @@ struct FAgentMcpAuditEntry
 	bool bIsError = false;
 	bool bRejectedByTier = false;
 	double DurationMs = 0.0;
+	/** Error text (truncated to 300 chars). Only meaningful when bIsError=true. */
+	FString ErrorText;
 };
 
 /**
