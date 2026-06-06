@@ -14,6 +14,7 @@
 #include "Tools/InputTools.h"
 #include "Tools/VariableComponentTools.h"
 #include "Tools/AnimMontageTools.h"
+#include "Tools/BehaviorTreeTools.h"
 #include "Tools/GameplayEffectTools.h"
 #include "Tools/MvvmTools.h"
 #include "Tools/WidgetTools.h"
@@ -38,6 +39,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterMvvmTools();
 	AgentMcp::Tools::RegisterMvvmBindingTools();
 	AgentMcp::Tools::RegisterAnimMontageTools();
+	AgentMcp::Tools::RegisterBehaviorTreeTools();
 	AgentMcp::Tools::RegisterGameplayEffectTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());

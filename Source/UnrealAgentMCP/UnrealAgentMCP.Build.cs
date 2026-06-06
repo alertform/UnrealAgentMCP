@@ -34,6 +34,7 @@ public class UnrealAgentMCP : ModuleRules
 			"MovieScene",
 			"GameplayAbilities",
 			"GameplayTags",
+			"AIModule",
 		});
 	}
 }
