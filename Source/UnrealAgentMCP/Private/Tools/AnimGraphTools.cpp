@@ -316,8 +316,14 @@ namespace
 		// SpawnNodeFromTemplate<T> is typed — we use the non-typed PerformAction path via
 		// FEdGraphSchemaAction_NewNode with a template object of the resolved class.
 		// This is the same internal path SpawnNodeFromTemplate<T> takes.
+		//
+		// NOTE: the template must NOT carry RF_Transient. CreateNode() duplicates the template
+		// via DuplicateObject (which copies object flags) and then only ADDS RF_Transactional.
+		// An RF_Transient graph node is silently skipped by SavePackage — the package "saves
+		// fine" but the node (and every pin link into it) vanishes on the next editor load.
+		// The transient-package outer alone already keeps the template itself from being saved.
 		UAnimGraphNode_Base* TemplateNode = NewObject<UAnimGraphNode_Base>(
-			GetTransientPackage(), NodeClass, NAME_None, RF_Transient);
+			GetTransientPackage(), NodeClass);
 		if (!TemplateNode)
 		{
 			Transaction.Cancel();
@@ -362,6 +368,10 @@ namespace
 				TEXT("Schema failed to create node of class '%s'. The graph may not support this node type."),
 				*NodeClass->GetName()));
 		}
+
+		// Defense-in-depth: strip RF_Transient in case any template/engine path reintroduces it —
+		// a transient node is dropped by SavePackage and the graph loads back without it.
+		NewNode->ClearFlags(RF_Transient);
 
 		FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(AnimBP);
 
