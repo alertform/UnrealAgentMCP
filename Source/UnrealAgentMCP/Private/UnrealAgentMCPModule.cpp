@@ -18,6 +18,7 @@
 #include "Tools/GameplayEffectTools.h"
 #include "Tools/MvvmTools.h"
 #include "Tools/WidgetTools.h"
+#include "Tools/AnimGraphTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
@@ -41,6 +42,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterAnimMontageTools();
 	AgentMcp::Tools::RegisterBehaviorTreeTools();
 	AgentMcp::Tools::RegisterGameplayEffectTools();
+	AgentMcp::Tools::RegisterAnimGraphTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

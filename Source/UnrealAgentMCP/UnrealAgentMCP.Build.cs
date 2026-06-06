@@ -35,6 +35,8 @@ public class UnrealAgentMCP : ModuleRules
 			"GameplayAbilities",
 			"GameplayTags",
 			"AIModule",
+			"AnimGraph",
+			"AnimGraphRuntime",
 		});
 	}
 }
