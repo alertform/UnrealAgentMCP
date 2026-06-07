@@ -38,6 +38,9 @@ public class UnrealAgentMCP : ModuleRules
 			"AIModule",
 			"AnimGraph",
 			"AnimGraphRuntime",
+			"IKRig",
+			"IKRigEditor",
+			"AnimationBlueprintLibrary",
 		});
 	}
 }
