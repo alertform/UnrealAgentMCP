@@ -19,6 +19,7 @@ public class UnrealAgentMCP : ModuleRules
 		{
 			"HTTPServer",
 			"AssetRegistry",
+			"AssetTools",
 			"BlueprintGraph",
 			"UnrealEd",
 			"BlueprintEditorLibrary",

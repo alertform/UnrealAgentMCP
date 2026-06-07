@@ -6,6 +6,7 @@
 #include "Misc/CoreMisc.h"
 #include "Server/McpHttpServer.h"
 #include "Tools/ActorTools.h"
+#include "Tools/AssetImportTools.h"
 #include "Tools/AssetQueryTools.h"
 #include "Tools/EditorInfoTools.h"
 #include "Tools/BlueprintTools.h"
@@ -28,6 +29,7 @@ void FUnrealAgentMCPModule::StartupModule()
 {
 	AgentMcp::Tools::RegisterEditorInfoTools();
 	AgentMcp::Tools::RegisterAssetQueryTools();
+	AgentMcp::Tools::RegisterAssetImportTools();
 	AgentMcp::Tools::RegisterNodeGraphTools();
 	AgentMcp::Tools::RegisterGraphPinAndLayoutTools();
 	AgentMcp::Tools::RegisterBlueprintTools();
