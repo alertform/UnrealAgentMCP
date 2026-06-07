@@ -274,6 +274,46 @@ bool FCreateAnimMontageSegmentsTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// FCreateAnimMontageLoopTest
+// loop:true links each section to ITSELF — an idle/stance montage that plays
+// until explicitly stopped (e.g. a blocking stance held by a GAS ability).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCreateAnimMontageLoopTest,
+	"UnrealAgentMCP.P7.CreateAnimMontageLoop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FCreateAnimMontageLoopTest::RunTest(const FString& Parameters)
+{
+	constexpr const TCHAR* KLoopMontagePath = TEXT("/Game/Dev_Test/AM_McpLoopMontageTest");
+	ON_SCOPE_EXIT { CleanupAsset(*this, KLoopMontagePath); };
+
+	bool bIsError = false;
+	const TSharedPtr<FJsonObject> Result = AgentMcpTestUtils::CallTool(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"source_animation\":\"%s\",\"asset_path\":\"%s\",\"loop\":true}"),
+			KIdleAnimPath, KLoopMontagePath),
+		bIsError);
+	TestFalse(TEXT("loop create_anim_montage succeeds"), bIsError);
+	if (!TestNotNull(TEXT("loop result parses"), Result.Get()))
+	{
+		return true;
+	}
+
+	UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr,
+		*(Result->GetStringField(TEXT("asset_path"))));
+	if (TestNotNull(TEXT("loop montage loads"), Montage))
+	{
+		TestEqual(TEXT("one section"), Montage->CompositeSections.Num(), 1);
+		if (Montage->CompositeSections.Num() == 1)
+		{
+			TestEqual(TEXT("section links to ITSELF (loops)"),
+				Montage->CompositeSections[0].NextSectionName,
+				Montage->CompositeSections[0].SectionName);
+		}
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // FAddAnimNotifyTest
 // Creates a montage (reuses the one from CreateAnimMontage if already present,
 // or creates fresh), adds AnimNotify_PlaySound at fraction 0.5, then cleans up.

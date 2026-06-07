@@ -317,6 +317,11 @@ namespace
 		// each segment. NextSectionName stays NAME_None — a DEAD END: playback stops at the
 		// section's end unless a GameplayAbility jumps onward (combo-chain semantics). The
 		// legacy single-segment montage keeps its one 'Default' section, same as before.
+		// loop=true instead links every section to ITSELF — a stance/idle montage that plays
+		// until explicitly stopped (e.g. a blocking stance held open by a GAS ability).
+		bool bLoop = false;
+		Args->TryGetBoolField(TEXT("loop"), bLoop);
+
 		TArray<TSharedPtr<FJsonValue>> SectionArray;
 		float RunningPos = 0.f;
 		bool bAnyEndClamped = false;
@@ -334,7 +339,7 @@ namespace
 			FCompositeSection Section;
 			Section.SectionName = Seg.SectionName;
 			Section.SetTime(RunningPos);
-			Section.NextSectionName = NAME_None;
+			Section.NextSectionName = bLoop ? Seg.SectionName : NAME_None;
 			Montage->CompositeSections.Add(Section);
 
 			TSharedRef<FJsonObject> SectionInfo = MakeShared<FJsonObject>();
@@ -720,6 +725,12 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 				TEXT("End time in seconds within the source animation (default = full source length). "
 				     "Values exceeding the source length are clamped. Must be > start_time."));
 			Props->SetObjectField(TEXT("end_time"), EndTimeProp);
+
+			TSharedRef<FJsonObject> LoopProp = MakeShared<FJsonObject>();
+			LoopProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			LoopProp->SetStringField(TEXT("description"),
+				TEXT("Link every section to itself: a stance/idle montage that loops until explicitly stopped. Default false (dead-end sections)."));
+			Props->SetObjectField(TEXT("loop"), LoopProp);
 
 			TSharedRef<FJsonObject> SegmentsProp = MakeShared<FJsonObject>();
 			SegmentsProp->SetStringField(TEXT("type"), TEXT("array"));
