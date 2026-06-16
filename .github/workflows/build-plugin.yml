@@ -1,0 +1,164 @@
+name: Build Plugin
+
+# Multi-version compile/package CI for the UnrealAgentMCP editor plugin.
+#
+#  job 1  linux-compile   — cheap multi-UE-version compile GATE on GitHub-hosted runners,
+#                           using Epic's official Linux dev images. Runs on every push/PR.
+#  job 2  windows-package — real Win64 .zip artifact on a SELF-HOSTED runner that has the
+#                           engines installed. Runs on manual dispatch or version tags.
+#
+# ── One-time setup ────────────────────────────────────────────────────────────────────
+#  Linux gate:
+#    1. Link your GitHub account to your Epic Games account and accept the UE EULA
+#       (https://www.unrealengine.com/en-US/ue-on-github) — this grants read access to
+#       the ghcr.io/epicgames/unreal-engine container images.
+#    2. Create a PAT with `read:packages` and add it as repo secret  GHCR_PAT.
+#  Windows artifacts:
+#    Register self-hosted Windows runner(s) with labels:  self-hosted, windows, ue-<ver>
+#    and set env var  UE_ROOT  on each to its engine root (e.g. D:\Epic Games\UE_5.5).
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────────────
+  # 0) Secret-free sanity gate (always runs on GitHub-hosted runners)
+  # ────────────────────────────────────────────────────────────────────────────────────
+  validate:
+    name: Validate workflow & manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse workflow YAML + .uplugin JSON
+        run: |
+          python3 -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')]; print('workflows OK')"
+          python3 -c "import json,glob; [json.load(open(f)) for f in glob.glob('**/*.uplugin', recursive=True)]; print('uplugin OK')"
+
+  # ────────────────────────────────────────────────────────────────────────────────────
+  # 1) Multi-version compile gate (Linux, GitHub-hosted, Epic dev containers)
+  # ────────────────────────────────────────────────────────────────────────────────────
+  linux-compile:
+    name: UE ${{ matrix.ue }} · Linux compile
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false           # one broken version must not hide the others
+      matrix:
+        ue: [ "5.3", "5.4", "5.5", "5.6", "5.7" ]   # add "5.8" once dev-5.8 lands on ghcr
+    container:
+      image: ghcr.io/epicgames/unreal-engine:dev-${{ matrix.ue }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GHCR_PAT }}
+      options: --user root       # GH workspace is root-owned; engine is readable by root
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate engine + plugin
+        id: paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          UAT=$(find /home -name RunUAT.sh -path '*BatchFiles*' 2>/dev/null | head -1)
+          UPLUGIN=$(find "$GITHUB_WORKSPACE" -maxdepth 2 -name '*.uplugin' | head -1)
+          test -n "$UAT"     || { echo "::error::RunUAT.sh not found in container"; exit 1; }
+          test -n "$UPLUGIN" || { echo "::error::no .uplugin found in checkout"; exit 1; }
+          echo "uat=$UAT"         >> "$GITHUB_OUTPUT"
+          echo "uplugin=$UPLUGIN" >> "$GITHUB_OUTPUT"
+          echo "Engine UAT : $UAT"
+          echo "Plugin     : $UPLUGIN"
+
+      - name: BuildPlugin (compile only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${{ steps.paths.outputs.uat }}" BuildPlugin \
+            -Plugin="${{ steps.paths.outputs.uplugin }}" \
+            -Package="$GITHUB_WORKSPACE/out/${{ matrix.ue }}" \
+            -TargetPlatforms=Linux \
+            -Rocket -Unversioned
+
+      - name: Upload Linux build
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnrealAgentMCP-UE${{ matrix.ue }}-Linux
+          path: out/${{ matrix.ue }}
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────────────
+  # 2) Packaged Win64 artifact (self-hosted runners with engines installed)
+  # ────────────────────────────────────────────────────────────────────────────────────
+  windows-package:
+    name: UE ${{ matrix.ue }} · Win64 package
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        ue: [ "5.5", "5.6", "5.7" ]   # must match your runners' ue-<ver> labels
+    runs-on: [ self-hosted, windows, "ue-${{ matrix.ue }}" ]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: BuildPlugin (Win64)
+        shell: cmd
+        run: |
+          if "%UE_ROOT%"=="" ( echo ::error::UE_ROOT not set on this runner & exit /b 1 )
+          for /f "delims=" %%U in ('dir /b /s *.uplugin') do set "UPLUGIN=%%U"
+          if "%UPLUGIN%"=="" ( echo ::error::no .uplugin found & exit /b 1 )
+          echo Engine: %UE_ROOT%
+          echo Plugin: %UPLUGIN%
+          "%UE_ROOT%\Engine\Build\BatchFiles\RunUAT.bat" BuildPlugin ^
+            -Plugin="%UPLUGIN%" ^
+            -Package="%GITHUB_WORKSPACE%\out\${{ matrix.ue }}" ^
+            -TargetPlatforms=Win64 ^
+            -Rocket -Unversioned
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnrealAgentMCP-UE${{ matrix.ue }}-Win64
+          path: out/${{ matrix.ue }}
+          if-no-files-found: error
+
+  # ────────────────────────────────────────────────────────────────────────────────────
+  # 3) Publish a GitHub Release on version tags, attaching each version's packaged zip
+  # ────────────────────────────────────────────────────────────────────────────────────
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ windows-package ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Zip each engine version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for d in artifacts/*/; do
+            name=$(basename "$d")
+            (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/${name}.zip" .)
+            echo "packed dist/${name}.zip"
+          done
+          ls -la dist
+
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
