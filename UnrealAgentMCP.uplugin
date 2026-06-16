@@ -22,6 +22,10 @@
 			"Enabled": true
 		},
 		{
+			"Name": "IKRig",
+			"Enabled": true
+		},
+		{
 			"Name": "ModelViewViewModel",
 			"Enabled": true
 		},

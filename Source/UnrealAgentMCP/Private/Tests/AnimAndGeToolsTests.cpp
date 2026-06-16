@@ -173,6 +173,147 @@ bool FCreateAnimMontageTest::RunTest(const FString& Parameters)
 }
 
 // ---------------------------------------------------------------------------
+// FCreateAnimMontageSegmentsTest
+// Multi-segment combo montage: two source sequences -> two segments + two
+// DEAD-END sections (NextSectionName=None — combo semantics: playback stops at
+// a section's end unless the ability MontageJumpToSection's onward).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCreateAnimMontageSegmentsTest,
+	"UnrealAgentMCP.P7.CreateAnimMontageSegments",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FCreateAnimMontageSegmentsTest::RunTest(const FString& Parameters)
+{
+	constexpr const TCHAR* KComboMontagePath = TEXT("/Game/Dev_Test/AM_McpComboMontageTest");
+	constexpr const TCHAR* KWalkAnimPath = TEXT("/Game/Characters/Mannequins/Animations/Manny/MM_Walk_Fwd");
+	ON_SCOPE_EXIT { CleanupAsset(*this, KComboMontagePath); };
+
+	bool bIsError = false;
+
+	// Happy path: two segments (idle cropped to 0.5s + walk full) with named sections.
+	const TSharedPtr<FJsonObject> Result = AgentMcpTestUtils::CallTool(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"%s\",\"slot_name\":\"DefaultSlot\",\"segments\":[")
+			TEXT("{\"source_animation\":\"%s\",\"section_name\":\"Combo1\",\"start_time\":0.0,\"end_time\":0.5},")
+			TEXT("{\"source_animation\":\"%s\",\"section_name\":\"Combo2\"}]}"),
+			KComboMontagePath, KIdleAnimPath, KWalkAnimPath),
+		bIsError);
+	TestFalse(TEXT("segments create_anim_montage succeeds"), bIsError);
+	if (!TestNotNull(TEXT("segments result parses"), Result.Get()))
+	{
+		return true;
+	}
+	TestTrue(TEXT("created:true"), Result->GetBoolField(TEXT("created")));
+
+	// Response carries one entry per section with name/time/length.
+	const TArray<TSharedPtr<FJsonValue>>* Sections = nullptr;
+	if (TestTrue(TEXT("sections array present with 2 entries"),
+		Result->TryGetArrayField(TEXT("sections"), Sections) && Sections->Num() == 2))
+	{
+		const TSharedPtr<FJsonObject> S0 = (*Sections)[0]->AsObject();
+		const TSharedPtr<FJsonObject> S1 = (*Sections)[1]->AsObject();
+		TestEqual(TEXT("section[0] name"), S0->GetStringField(TEXT("name")), FString(TEXT("Combo1")));
+		TestEqual(TEXT("section[1] name"), S1->GetStringField(TEXT("name")), FString(TEXT("Combo2")));
+		TestTrue(TEXT("section[0] starts at 0"), FMath::Abs(S0->GetNumberField(TEXT("time"))) < 0.001);
+		TestTrue(TEXT("section[1] starts at 0.5"),
+			FMath::Abs(S1->GetNumberField(TEXT("time")) - 0.5) < 0.01);
+		TestTrue(TEXT("section[0] length 0.5"),
+			FMath::Abs(S0->GetNumberField(TEXT("length")) - 0.5) < 0.01);
+	}
+
+	// In-memory asset: segment layout + dead-end section links.
+	UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr,
+		*(Result->GetStringField(TEXT("asset_path"))));
+	if (TestNotNull(TEXT("combo montage loads"), Montage))
+	{
+		TestTrue(TEXT("two segments on slot 0"),
+			Montage->SlotAnimTracks.Num() > 0 &&
+			Montage->SlotAnimTracks[0].AnimTrack.AnimSegments.Num() == 2);
+		TestEqual(TEXT("two composite sections"), Montage->CompositeSections.Num(), 2);
+		if (Montage->CompositeSections.Num() == 2)
+		{
+			TestEqual(TEXT("section 0 named Combo1"),
+				Montage->CompositeSections[0].SectionName, FName(TEXT("Combo1")));
+			TestEqual(TEXT("section 1 named Combo2"),
+				Montage->CompositeSections[1].SectionName, FName(TEXT("Combo2")));
+			TestEqual(TEXT("section 0 is a dead end (no auto-chain)"),
+				Montage->CompositeSections[0].NextSectionName, FName(NAME_None));
+			TestEqual(TEXT("section 1 is a dead end"),
+				Montage->CompositeSections[1].NextSectionName, FName(NAME_None));
+		}
+		// Montage length = 0.5 (cropped idle) + full walk length.
+		UAnimSequence* Walk = LoadObject<UAnimSequence>(nullptr,
+			TEXT("/Game/Characters/Mannequins/Animations/Manny/MM_Walk_Fwd.MM_Walk_Fwd"));
+		if (Walk)
+		{
+			TestTrue(TEXT("montage length = 0.5 + walk length"),
+				FMath::Abs(Montage->GetPlayLength() - (0.5f + Walk->GetPlayLength())) < 0.02f);
+		}
+	}
+
+	// Error path: segment element missing section_name.
+	const FString NoSectionErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"/Game/Dev_Test/AM_McpComboBad\",\"segments\":[{\"source_animation\":\"%s\"}]}"),
+			KIdleAnimPath),
+		bIsError);
+	TestTrue(TEXT("segment without section_name is error"), bIsError);
+	TestTrue(TEXT("error names section_name"),
+		NoSectionErr.Contains(TEXT("section_name"), ESearchCase::IgnoreCase));
+
+	// Error path: duplicate section names.
+	const FString DupSectionErr = AgentMcpTestUtils::CallToolRawText(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"asset_path\":\"/Game/Dev_Test/AM_McpComboBad\",\"segments\":[")
+			TEXT("{\"source_animation\":\"%s\",\"section_name\":\"Combo1\"},")
+			TEXT("{\"source_animation\":\"%s\",\"section_name\":\"Combo1\"}]}"),
+			KIdleAnimPath, KIdleAnimPath),
+		bIsError);
+	TestTrue(TEXT("duplicate section names is error"), bIsError);
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// FCreateAnimMontageLoopTest
+// loop:true links each section to ITSELF — an idle/stance montage that plays
+// until explicitly stopped (e.g. a blocking stance held by a GAS ability).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FCreateAnimMontageLoopTest,
+	"UnrealAgentMCP.P7.CreateAnimMontageLoop",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FCreateAnimMontageLoopTest::RunTest(const FString& Parameters)
+{
+	constexpr const TCHAR* KLoopMontagePath = TEXT("/Game/Dev_Test/AM_McpLoopMontageTest");
+	ON_SCOPE_EXIT { CleanupAsset(*this, KLoopMontagePath); };
+
+	bool bIsError = false;
+	const TSharedPtr<FJsonObject> Result = AgentMcpTestUtils::CallTool(*this, TEXT("create_anim_montage"),
+		FString::Printf(
+			TEXT("{\"source_animation\":\"%s\",\"asset_path\":\"%s\",\"loop\":true}"),
+			KIdleAnimPath, KLoopMontagePath),
+		bIsError);
+	TestFalse(TEXT("loop create_anim_montage succeeds"), bIsError);
+	if (!TestNotNull(TEXT("loop result parses"), Result.Get()))
+	{
+		return true;
+	}
+
+	UAnimMontage* Montage = LoadObject<UAnimMontage>(nullptr,
+		*(Result->GetStringField(TEXT("asset_path"))));
+	if (TestNotNull(TEXT("loop montage loads"), Montage))
+	{
+		TestEqual(TEXT("one section"), Montage->CompositeSections.Num(), 1);
+		if (Montage->CompositeSections.Num() == 1)
+		{
+			TestEqual(TEXT("section links to ITSELF (loops)"),
+				Montage->CompositeSections[0].NextSectionName,
+				Montage->CompositeSections[0].SectionName);
+		}
+	}
+	return true;
+}
+
+// ---------------------------------------------------------------------------
 // FAddAnimNotifyTest
 // Creates a montage (reuses the one from CreateAnimMontage if already present,
 // or creates fresh), adds AnimNotify_PlaySound at fraction 0.5, then cleans up.

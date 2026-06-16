@@ -1,0 +1,105 @@
+name: Build Plugin
+
+# CI for the UnrealAgentMCP editor plugin.
+#
+# Why no GitHub-hosted multi-version build:
+#   Building a UE plugin on a hosted runner needs the engine, which only comes from Epic's
+#   official Linux containers (ghcr.io/epicgames/unreal-engine). Accounts linked through the
+#   sharded EpicGames-Mirror-* orgs get UE *source* access but NOT read access to the main
+#   epicgames org's container packages — `docker pull` returns HTTP 403. So a real compile
+#   must run on a self-hosted runner that already has the engine installed.
+#
+#  validate       — secret-free YAML + .uplugin sanity gate. Runs on every push/PR. Always green.
+#  windows-build  — OPT-IN compile on a SELF-HOSTED runner that has UE installed. Triggered
+#                   manually (workflow_dispatch) or on a version tag. Single version by default
+#                   (matches the locally-installed engine); add rows to the matrix per engine
+#                   you actually have installed.
+#  release        — on version tags, zips the built plugin and attaches it to a GitHub Release.
+#
+# Self-hosted setup (only needed for windows-build): register a runner with labels
+#   self-hosted, windows, ue-5.5   and set env var  UE_ROOT  to the engine root
+#   (e.g. D:\Epic Games\UE_5.5).
+
+on:
+  push:
+    branches: [ main, dev ]
+    tags: [ "v*" ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Free, always-on sanity gate (no engine, no secrets).
+  validate:
+    name: Validate workflow & manifest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Parse workflow YAML + .uplugin JSON
+        run: |
+          python3 -c "import yaml,glob; [yaml.safe_load(open(f)) for f in glob.glob('.github/workflows/*.yml')]; print('workflows OK')"
+          python3 -c "import json,glob; [json.load(open(f)) for f in glob.glob('**/*.uplugin', recursive=True)]; print('uplugin OK')"
+
+  # Opt-in real compile on a self-hosted runner (manual or tag only).
+  windows-build:
+    name: UE ${{ matrix.ue }} · Win64 package (self-hosted)
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        ue: [ "5.5" ]          # add more (e.g. "5.6","5.7") only if those engines are installed on the runner
+    runs-on: [ self-hosted, windows, "ue-${{ matrix.ue }}" ]
+    steps:
+      - uses: actions/checkout@v4
+      - name: BuildPlugin (Win64)
+        shell: cmd
+        run: |
+          if "%UE_ROOT%"=="" ( echo ::error::UE_ROOT not set on this runner & exit /b 1 )
+          for /f "delims=" %%U in ('dir /b /s *.uplugin') do set "UPLUGIN=%%U"
+          if "%UPLUGIN%"=="" ( echo ::error::no .uplugin found & exit /b 1 )
+          echo Engine: %UE_ROOT%
+          echo Plugin: %UPLUGIN%
+          "%UE_ROOT%\Engine\Build\BatchFiles\RunUAT.bat" BuildPlugin ^
+            -Plugin="%UPLUGIN%" ^
+            -Package="%GITHUB_WORKSPACE%\out\${{ matrix.ue }}" ^
+            -TargetPlatforms=Win64 ^
+            -Rocket -Unversioned
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnrealAgentMCP-UE${{ matrix.ue }}-Win64
+          path: out/${{ matrix.ue }}
+          if-no-files-found: error
+
+  # Publish a GitHub Release on version tags.
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ windows-build ]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Zip each engine version
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for d in artifacts/*/; do
+            name=$(basename "$d")
+            (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/${name}.zip" .)
+            echo "packed dist/${name}.zip"
+          done
+          ls -la dist
+      - name: Create / update GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true

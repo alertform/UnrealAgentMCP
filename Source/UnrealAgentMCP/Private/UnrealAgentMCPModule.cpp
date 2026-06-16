@@ -6,6 +6,7 @@
 #include "Misc/CoreMisc.h"
 #include "Server/McpHttpServer.h"
 #include "Tools/ActorTools.h"
+#include "Tools/AssetImportTools.h"
 #include "Tools/AssetQueryTools.h"
 #include "Tools/EditorInfoTools.h"
 #include "Tools/BlueprintTools.h"
@@ -19,6 +20,7 @@
 #include "Tools/MvvmTools.h"
 #include "Tools/WidgetTools.h"
 #include "Tools/AnimGraphTools.h"
+#include "Tools/RetargetTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
@@ -28,6 +30,7 @@ void FUnrealAgentMCPModule::StartupModule()
 {
 	AgentMcp::Tools::RegisterEditorInfoTools();
 	AgentMcp::Tools::RegisterAssetQueryTools();
+	AgentMcp::Tools::RegisterAssetImportTools();
 	AgentMcp::Tools::RegisterNodeGraphTools();
 	AgentMcp::Tools::RegisterGraphPinAndLayoutTools();
 	AgentMcp::Tools::RegisterBlueprintTools();
@@ -43,6 +46,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterBehaviorTreeTools();
 	AgentMcp::Tools::RegisterGameplayEffectTools();
 	AgentMcp::Tools::RegisterAnimGraphTools();
+	AgentMcp::Tools::RegisterRetargetTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

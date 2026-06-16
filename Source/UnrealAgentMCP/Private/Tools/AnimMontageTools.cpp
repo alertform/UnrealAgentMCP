@@ -99,15 +99,89 @@ namespace
 	// create_anim_montage
 	// ---------------------------------------------------------------------------
 
+	/** One montage segment parsed from tool args (legacy single-source or segments[] element). */
+	struct FParsedMontageSegment
+	{
+		UAnimSequence* Sequence = nullptr;
+		float Start = 0.f;
+		float End = 0.f;
+		bool bEndClamped = false;
+		FName SectionName;
+	};
+
+	/**
+	 * Parses + validates one segment description. SectionName is taken from 'section_name'
+	 * (required when bRequireSectionName). Returns false with OutError set on any failure.
+	 */
+	bool ParseMontageSegment(const TSharedPtr<FJsonObject>& Obj, bool bRequireSectionName,
+		FParsedMontageSegment& Out, FString& OutError)
+	{
+		FString SourcePath;
+		if (!Obj.IsValid() || !Obj->TryGetStringField(TEXT("source_animation"), SourcePath))
+		{
+			OutError = TEXT("Missing required string argument 'source_animation'.");
+			return false;
+		}
+
+		FString SectionName;
+		if (Obj->TryGetStringField(TEXT("section_name"), SectionName) && !SectionName.TrimStartAndEnd().IsEmpty())
+		{
+			Out.SectionName = FName(*SectionName);
+		}
+		else if (bRequireSectionName)
+		{
+			OutError = FString::Printf(
+				TEXT("Each entry of 'segments' requires a non-empty 'section_name' (offending source: '%s')."), *SourcePath);
+			return false;
+		}
+
+		FString LoadError;
+		UAnimSequenceBase* SourceAnim = ResolveAnimAsset(SourcePath, LoadError);
+		if (!SourceAnim)
+		{
+			OutError = LoadError;
+			return false;
+		}
+		Out.Sequence = Cast<UAnimSequence>(SourceAnim);
+		if (!Out.Sequence)
+		{
+			OutError = FString::Printf(
+				TEXT("'%s' is not a UAnimSequence (got %s). create_anim_montage requires AnimSequence sources."),
+				*SourcePath, *SourceAnim->GetClass()->GetName());
+			return false;
+		}
+
+		const float SourceLength = Out.Sequence->GetPlayLength();
+		double RawStartTime = 0.0;
+		double RawEndTime = static_cast<double>(SourceLength);
+		Obj->TryGetNumberField(TEXT("start_time"), RawStartTime);
+		Obj->TryGetNumberField(TEXT("end_time"), RawEndTime);
+
+		if (RawStartTime < 0.0)
+		{
+			OutError = FString::Printf(TEXT("'start_time' must be >= 0. Got: %.4f (source '%s')"), RawStartTime, *SourcePath);
+			return false;
+		}
+
+		Out.bEndClamped = RawEndTime > static_cast<double>(SourceLength);
+		Out.Start = static_cast<float>(RawStartTime);
+		Out.End = FMath::Clamp(static_cast<float>(RawEndTime), 0.f, SourceLength);
+
+		if (Out.End - Out.Start <= 0.f)
+		{
+			OutError = FString::Printf(
+				TEXT("'end_time' (%.4f) must be greater than 'start_time' (%.4f) after clamping (source '%s')."),
+				Out.End, Out.Start, *SourcePath);
+			return false;
+		}
+		return true;
+	}
+
 	FAgentMcpToolResult HandleCreateAnimMontage(const TSharedPtr<FJsonObject>& Args)
 	{
-		FString SourcePath, AssetPath, SlotName = TEXT("DefaultSlot");
+		FString AssetPath, SlotName = TEXT("DefaultSlot");
 
-		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("source_animation"), SourcePath))
-		{
-			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'source_animation'."));
-		}
-		if (!Args->TryGetStringField(TEXT("asset_path"), AssetPath))
+		if (!Args.IsValid() || !Args->TryGetStringField(TEXT("asset_path"), AssetPath))
 		{
 			return FAgentMcpToolResult::Error(TEXT("Missing required string argument 'asset_path'."));
 		}
@@ -119,56 +193,72 @@ namespace
 				TEXT("'asset_path' must be an absolute package path starting with '/'. Got: '%s'"), *AssetPath));
 		}
 
-		// Load source animation.
-		FString LoadError;
-		UAnimSequenceBase* SourceAnim = ResolveAnimAsset(SourcePath, LoadError);
-		if (!SourceAnim)
+		// Parse either the multi-segment form ('segments' array — one DEAD-END section per
+		// segment, combo semantics) or the legacy single-source form (one 'Default' section).
+		TArray<FParsedMontageSegment> Segments;
+		const TArray<TSharedPtr<FJsonValue>>* SegmentsJson = nullptr;
+		const bool bMultiSegment = Args->TryGetArrayField(TEXT("segments"), SegmentsJson);
+		FString ParseError;
+
+		if (bMultiSegment)
 		{
-			return FAgentMcpToolResult::Error(LoadError);
+			if (SegmentsJson->Num() == 0)
+			{
+				return FAgentMcpToolResult::Error(TEXT("'segments' must contain at least one entry."));
+			}
+			TSet<FName> SeenSections;
+			for (const TSharedPtr<FJsonValue>& Value : *SegmentsJson)
+			{
+				FParsedMontageSegment Parsed;
+				if (!ParseMontageSegment(Value->AsObject(), /*bRequireSectionName=*/true, Parsed, ParseError))
+				{
+					return FAgentMcpToolResult::Error(ParseError);
+				}
+				if (SeenSections.Contains(Parsed.SectionName))
+				{
+					return FAgentMcpToolResult::Error(FString::Printf(
+						TEXT("Duplicate section_name '%s' — section names must be unique."), *Parsed.SectionName.ToString()));
+				}
+				SeenSections.Add(Parsed.SectionName);
+				Segments.Add(Parsed);
+			}
+		}
+		else
+		{
+			FParsedMontageSegment Parsed;
+			Parsed.SectionName = FName(TEXT("Default"));
+			if (!ParseMontageSegment(Args, /*bRequireSectionName=*/false, Parsed, ParseError))
+			{
+				return FAgentMcpToolResult::Error(ParseError);
+			}
+			Parsed.SectionName = FName(TEXT("Default")); // legacy: ignore any section_name on the top level
+			Segments.Add(Parsed);
 		}
 
-		UAnimSequence* SourceSeq = Cast<UAnimSequence>(SourceAnim);
-		if (!SourceSeq)
-		{
-			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("'%s' is not a UAnimSequence (got %s). create_anim_montage requires an AnimSequence source."),
-				*SourcePath, *SourceAnim->GetClass()->GetName()));
-		}
-
-		USkeleton* Skeleton = SourceSeq->GetSkeleton();
+		// All segments must share one skeleton.
+		USkeleton* Skeleton = Segments[0].Sequence->GetSkeleton();
 		if (!Skeleton)
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("Source animation '%s' has no skeleton. Cannot create a montage without a skeleton."), *SourcePath));
+				TEXT("Source animation '%s' has no skeleton. Cannot create a montage without a skeleton."),
+				*Segments[0].Sequence->GetPathName()));
 		}
-
-		// Retrieve and validate optional cropping parameters.
-		const float SourceLength = SourceSeq->GetPlayLength();
-
-		double RawStartTime = 0.0;
-		double RawEndTime   = static_cast<double>(SourceLength);
-		Args->TryGetNumberField(TEXT("start_time"), RawStartTime);
-		Args->TryGetNumberField(TEXT("end_time"),   RawEndTime);
-
-		if (RawStartTime < 0.0)
+		for (const FParsedMontageSegment& Seg : Segments)
 		{
-			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("'start_time' must be >= 0. Got: %.4f"), RawStartTime));
+			if (Seg.Sequence->GetSkeleton() != Skeleton)
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("All segments must share one skeleton: '%s' uses '%s' but '%s' uses '%s'."),
+					*Segments[0].Sequence->GetName(), *GetNameSafe(Skeleton),
+					*Seg.Sequence->GetName(), *GetNameSafe(Seg.Sequence->GetSkeleton())));
+			}
 		}
 
-		// Clamp end_time to source length (report actual value in response).
-		const bool bEndTimeClamped = RawEndTime > static_cast<double>(SourceLength);
-		const float EffectiveStartTime = static_cast<float>(RawStartTime);
-		const float EffectiveEndTime   = FMath::Clamp(static_cast<float>(RawEndTime), 0.f, SourceLength);
-
-		if (EffectiveEndTime - EffectiveStartTime <= 0.f)
+		float MontageLength = 0.f;
+		for (const FParsedMontageSegment& Seg : Segments)
 		{
-			return FAgentMcpToolResult::Error(FString::Printf(
-				TEXT("'end_time' (%.4f) must be greater than 'start_time' (%.4f) after clamping."),
-				EffectiveEndTime, EffectiveStartTime));
+			MontageLength += Seg.End - Seg.Start;
 		}
-
-		const float MontageLength = EffectiveEndTime - EffectiveStartTime;
 
 		// Validate / create target package.
 		const FString PackageName = FPackageName::ObjectPathToPackageName(AssetPath);
@@ -223,30 +313,46 @@ namespace
 			Montage->SlotAnimTracks[0].SlotName = FName(*SlotName);
 		}
 
-		// Add a single segment covering [EffectiveStartTime, EffectiveEndTime] of the source.
-		// StartPos=0 anchors the segment to the start of the montage timeline.
+		// Lay segments back-to-back on the montage timeline; one composite section starts at
+		// each segment. NextSectionName stays NAME_None — a DEAD END: playback stops at the
+		// section's end unless a GameplayAbility jumps onward (combo-chain semantics). The
+		// legacy single-segment montage keeps its one 'Default' section, same as before.
+		// loop=true instead links every section to ITSELF — a stance/idle montage that plays
+		// until explicitly stopped (e.g. a blocking stance held open by a GAS ability).
+		bool bLoop = false;
+		Args->TryGetBoolField(TEXT("loop"), bLoop);
+
+		TArray<TSharedPtr<FJsonValue>> SectionArray;
+		float RunningPos = 0.f;
+		bool bAnyEndClamped = false;
+		for (const FParsedMontageSegment& Seg : Segments)
 		{
 			FAnimSegment Segment;
-			Segment.SetAnimReference(SourceSeq, true);
-			Segment.AnimStartTime = EffectiveStartTime;
-			Segment.AnimEndTime   = EffectiveEndTime;
-			Segment.StartPos      = 0.f;
+			Segment.SetAnimReference(Seg.Sequence, true);
+			Segment.AnimStartTime = Seg.Start;
+			Segment.AnimEndTime   = Seg.End;
+			Segment.StartPos      = RunningPos;
 			Segment.AnimPlayRate  = 1.f;
 			Segment.LoopingCount  = 1;
 			Montage->SlotAnimTracks[0].AnimTrack.AnimSegments.Add(Segment);
+
+			FCompositeSection Section;
+			Section.SectionName = Seg.SectionName;
+			Section.SetTime(RunningPos);
+			Section.NextSectionName = bLoop ? Seg.SectionName : NAME_None;
+			Montage->CompositeSections.Add(Section);
+
+			TSharedRef<FJsonObject> SectionInfo = MakeShared<FJsonObject>();
+			SectionInfo->SetStringField(TEXT("name"), Seg.SectionName.ToString());
+			SectionInfo->SetNumberField(TEXT("time"), static_cast<double>(RunningPos));
+			SectionInfo->SetNumberField(TEXT("length"), static_cast<double>(Seg.End - Seg.Start));
+			SectionArray.Add(MakeShared<FJsonValueObject>(SectionInfo));
+
+			RunningPos += Seg.End - Seg.Start;
+			bAnyEndClamped |= Seg.bEndClamped;
 		}
 
-		// Set composite length to the cropped duration.
 		Montage->SetCompositeLength(MontageLength);
-
-		// Ensure a default composite section at time 0.
-		if (Montage->CompositeSections.Num() == 0)
-		{
-			FCompositeSection DefaultSection;
-			DefaultSection.SetTime(0.f);
-			DefaultSection.SectionName = FName(TEXT("Default"));
-			Montage->CompositeSections.Add(DefaultSection);
-		}
 
 		// Refresh runtime cache.
 		Montage->RefreshCacheData();
@@ -260,9 +366,14 @@ namespace
 		Result->SetStringField(TEXT("asset_path"), Montage->GetPathName());
 		Result->SetNumberField(TEXT("length"),     static_cast<double>(MontageLength));
 		Result->SetStringField(TEXT("slot"),       SlotName);
-		Result->SetNumberField(TEXT("start_time"), static_cast<double>(EffectiveStartTime));
-		Result->SetNumberField(TEXT("end_time"),   static_cast<double>(EffectiveEndTime));
-		if (bEndTimeClamped)
+		Result->SetArrayField(TEXT("sections"),    SectionArray);
+		if (!bMultiSegment)
+		{
+			// Legacy response shape: single-source callers still get start_time/end_time back.
+			Result->SetNumberField(TEXT("start_time"), static_cast<double>(Segments[0].Start));
+			Result->SetNumberField(TEXT("end_time"),   static_cast<double>(Segments[0].End));
+		}
+		if (bAnyEndClamped)
 		{
 			Result->SetStringField(TEXT("end_time_note"),
 				TEXT("end_time was clamped to source animation length."));
@@ -575,13 +686,13 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 		FAgentMcpToolDef Def;
 		Def.Name = TEXT("create_anim_montage");
 		Def.Description = TEXT(
-			"SafeWrite. Creates a UAnimMontage asset from an existing AnimSequence. "
-			"The montage is skeleton-matched, contains one slot track, and a single segment. "
-			"Optional start_time/end_time crop the segment to a sub-range of the source; omit both to use the full length. "
-			"end_time exceeding the source length is silently clamped. "
-			"Returns {created, asset_path, length, slot, start_time, end_time} (actual effective values). "
-			"Args: source_animation (required), asset_path (required), slot_name (optional, default DefaultSlot), "
-			"start_time (optional float seconds, default 0), end_time (optional float seconds, default source length).");
+			"SafeWrite. Creates a UAnimMontage asset from one or more AnimSequences. "
+			"Single-source form: source_animation (required) + optional start_time/end_time crop; one slot track, one segment, one 'Default' section. "
+			"Multi-segment form: 'segments' array of {source_animation, section_name (required, unique), start_time?, end_time?} — segments lay back-to-back, "
+			"each starts a DEAD-END composite section (NextSection=None): playback stops at the section's end unless an ability MontageJumpToSection's onward (combo-chain semantics). "
+			"All sources must share one skeleton. end_time exceeding the source length is silently clamped. "
+			"Returns {created, asset_path, length, slot, sections:[{name,time,length}]} (+ start_time/end_time in single-source form). "
+			"Args: asset_path (required), source_animation OR segments (one required), slot_name (optional, default DefaultSlot), start_time/end_time (single-source only).");
 		Def.InputSchema = MakeShared<FJsonObject>();
 		Def.InputSchema->SetStringField(TEXT("type"), TEXT("object"));
 		{
@@ -615,10 +726,28 @@ void AgentMcp::Tools::RegisterAnimMontageTools()
 				     "Values exceeding the source length are clamped. Must be > start_time."));
 			Props->SetObjectField(TEXT("end_time"), EndTimeProp);
 
+			TSharedRef<FJsonObject> LoopProp = MakeShared<FJsonObject>();
+			LoopProp->SetStringField(TEXT("type"), TEXT("boolean"));
+			LoopProp->SetStringField(TEXT("description"),
+				TEXT("Link every section to itself: a stance/idle montage that loops until explicitly stopped. Default false (dead-end sections)."));
+			Props->SetObjectField(TEXT("loop"), LoopProp);
+
+			TSharedRef<FJsonObject> SegmentsProp = MakeShared<FJsonObject>();
+			SegmentsProp->SetStringField(TEXT("type"), TEXT("array"));
+			SegmentsProp->SetStringField(TEXT("description"),
+				TEXT("Multi-segment form: [{source_animation, section_name (unique), start_time?, end_time?}]. "
+				     "Each segment starts a dead-end section (no auto-chain) — combo montage semantics. "
+				     "Mutually exclusive with the top-level source_animation/start_time/end_time."));
+			{
+				TSharedRef<FJsonObject> ItemSchema = MakeShared<FJsonObject>();
+				ItemSchema->SetStringField(TEXT("type"), TEXT("object"));
+				SegmentsProp->SetObjectField(TEXT("items"), ItemSchema);
+			}
+			Props->SetObjectField(TEXT("segments"), SegmentsProp);
+
 			Def.InputSchema->SetObjectField(TEXT("properties"), Props);
 
 			TArray<TSharedPtr<FJsonValue>> Required;
-			Required.Add(MakeShared<FJsonValueString>(TEXT("source_animation")));
 			Required.Add(MakeShared<FJsonValueString>(TEXT("asset_path")));
 			Def.InputSchema->SetArrayField(TEXT("required"), Required);
 		}

@@ -19,6 +19,7 @@ public class UnrealAgentMCP : ModuleRules
 		{
 			"HTTPServer",
 			"AssetRegistry",
+			"AssetTools",
 			"BlueprintGraph",
 			"UnrealEd",
 			"BlueprintEditorLibrary",
@@ -37,6 +38,9 @@ public class UnrealAgentMCP : ModuleRules
 			"AIModule",
 			"AnimGraph",
 			"AnimGraphRuntime",
+			"IKRig",
+			"IKRigEditor",
+			"AnimationBlueprintLibrary",
 		});
 	}
 }
