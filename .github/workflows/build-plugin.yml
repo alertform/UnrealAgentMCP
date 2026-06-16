@@ -43,6 +43,42 @@ jobs:
           python3 -c "import json,glob; [json.load(open(f)) for f in glob.glob('**/*.uplugin', recursive=True)]; print('uplugin OK')"
 
   # ────────────────────────────────────────────────────────────────────────────────────
+  # 0b) Diagnostic: does GHCR_PAT actually have read access to Epic's containers?
+  #     (prints only token SCOPES + an HTTP code — never the token; secrets are masked)
+  # ────────────────────────────────────────────────────────────────────────────────────
+  ghcr-auth-check:
+    name: GHCR token/access diagnostic
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose GHCR_PAT access to ghcr.io/epicgames
+        env:
+          PAT: ${{ secrets.GHCR_PAT }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -u
+          if [ -z "${PAT}" ]; then echo "::error::GHCR_PAT secret is empty/unset"; exit 1; fi
+          echo "actor=$ACTOR"
+          echo "--- token scopes (a classic PAT must list read:packages) ---"
+          curl -sI -H "Authorization: token $PAT" https://api.github.com \
+            | grep -i '^x-oauth-scopes:' \
+            || echo "(no x-oauth-scopes header -> fine-grained token; it CANNOT read another org's packages)"
+          echo "--- pull-token + manifest access for epicgames/unreal-engine:dev-5.5 ---"
+          BEARER=$(curl -s -u "$ACTOR:$PAT" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:epicgames/unreal-engine:pull" \
+            | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          [ -z "$BEARER" ] && echo "::warning::no pull token returned (auth rejected at token endpoint)"
+          CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $BEARER" \
+            -H "Accept: application/vnd.oci.image.index.v1+json" \
+            "https://ghcr.io/v2/epicgames/unreal-engine/manifests/dev-5.5")
+          echo "manifest HTTP=$CODE"
+          case "$CODE" in
+            200) echo "RESULT: token CAN pull epicgames containers -> linux-compile failure is a workflow/secret-wiring issue, not access" ;;
+            401|403) echo "RESULT: DENIED -> token lacks read:packages, OR EpicGames-Mirror membership does not grant epicgames package read" ;;
+            *) echo "RESULT: unexpected HTTP $CODE" ;;
+          esac
+
+  # ────────────────────────────────────────────────────────────────────────────────────
   # 1) Multi-version compile gate (Linux, GitHub-hosted, Epic dev containers)
   # ────────────────────────────────────────────────────────────────────────────────────
   linux-compile:
