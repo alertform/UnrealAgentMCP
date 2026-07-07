@@ -1,16 +1,23 @@
 #include "Tools/MaterialTools.h"
 
 #include "AssetToolsModule.h"
+#include "Components/MeshComponent.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
 #include "Dom/JsonValue.h"
+#include "Editor.h"
+#include "Engine/Texture.h"
 #include "Factories/MaterialFactoryNew.h"
+#include "Factories/MaterialInstanceConstantFactoryNew.h"
+#include "GameFramework/Actor.h"
 #include "IAssetTools.h"
 #include "MaterialEditingLibrary.h"
 #include "MaterialExpressionIO.h"
 #include "Materials/Material.h"
 #include "Materials/MaterialExpression.h"
+#include "Materials/MaterialInstanceConstant.h"
+#include "Materials/MaterialInterface.h"
 #include "Misc/OutputDevice.h"
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
@@ -132,6 +139,39 @@ namespace
 			if (E && E->GetName() == Id) { return E; }
 		}
 		return nullptr;
+	}
+
+	// Resolves a Material OR MaterialInstance (both UMaterialInterface) — for MIC parents / assign targets.
+	UMaterialInterface* ResolveMaterialInterface(const FString& Path, FString& OutError)
+	{
+		UMaterialInterface* MI = FindObject<UMaterialInterface>(nullptr, *Path);
+		if (!MI)
+		{
+			FString Pkg = Path;
+			int32 Dot = INDEX_NONE;
+			if (Pkg.FindChar(TEXT('.'), Dot)) { Pkg = Pkg.Left(Dot); }
+			const FString ObjPath = Pkg + TEXT(".") + FPackageName::GetShortName(Pkg);
+			MI = FindObject<UMaterialInterface>(nullptr, *ObjPath);
+			if (!MI) { MI = LoadObject<UMaterialInterface>(nullptr, *ObjPath); }
+		}
+		if (!MI) { OutError = FString::Printf(TEXT("Material/MaterialInstance not found: '%s'."), *Path); }
+		return MI;
+	}
+
+	UMaterialInstanceConstant* ResolveMaterialInstance(const FString& Path, FString& OutError)
+	{
+		UMaterialInstanceConstant* MIC = FindObject<UMaterialInstanceConstant>(nullptr, *Path);
+		if (!MIC)
+		{
+			FString Pkg = Path;
+			int32 Dot = INDEX_NONE;
+			if (Pkg.FindChar(TEXT('.'), Dot)) { Pkg = Pkg.Left(Dot); }
+			const FString ObjPath = Pkg + TEXT(".") + FPackageName::GetShortName(Pkg);
+			MIC = FindObject<UMaterialInstanceConstant>(nullptr, *ObjPath);
+			if (!MIC) { MIC = LoadObject<UMaterialInstanceConstant>(nullptr, *ObjPath); }
+		}
+		if (!MIC) { OutError = FString::Printf(TEXT("MaterialInstanceConstant not found: '%s'. Create one with create_material_instance."), *Path); }
+		return MIC;
 	}
 
 	// ── schema sugar (keeps registrations to a few lines each) ────────────────────
@@ -386,6 +426,190 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
 	}
 
+	// ── M2: material instances + assignment ──────────────────────────────────────
+	FAgentMcpToolResult HandleCreateMaterialInstance(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString Name, Dest, ParentPath;
+		if (!Args->TryGetStringField(TEXT("name"), Name))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'name'.")); }
+		if (!Args->TryGetStringField(TEXT("destination_path"), Dest))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'destination_path'.")); }
+		if (!Args->TryGetStringField(TEXT("parent"), ParentPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'parent' (a Material or Material Instance).")); }
+		if (!Dest.StartsWith(TEXT("/Game")))
+			{ return FAgentMcpToolResult::Error(TEXT("destination_path must be under /Game.")); }
+
+		FString Err;
+		UMaterialInterface* Parent = ResolveMaterialInterface(ParentPath, Err);
+		if (!Parent) { return FAgentMcpToolResult::Error(Err); }
+
+		IAssetTools& AssetTools = FModuleManager::LoadModuleChecked<FAssetToolsModule>(TEXT("AssetTools")).Get();
+		UMaterialInstanceConstantFactoryNew* Factory = NewObject<UMaterialInstanceConstantFactoryNew>();
+		Factory->InitialParent = Parent;
+		UObject* NewAsset = AssetTools.CreateAsset(Name, Dest, UMaterialInstanceConstant::StaticClass(), Factory);
+		UMaterialInstanceConstant* MIC = Cast<UMaterialInstanceConstant>(NewAsset);
+		if (!MIC)
+			{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("CreateAsset failed for '%s' in '%s'."), *Name, *Dest)); }
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetStringField(TEXT("object_path"), MIC->GetPathName());
+		Out->SetStringField(TEXT("package_path"), Dest / Name);
+		Out->SetStringField(TEXT("parent"), Parent->GetPathName());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
+
+	FAgentMcpToolResult HandleSetMaterialInstanceParameter(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString MicPath, ParamName, Type, Value;
+		if (!Args->TryGetStringField(TEXT("material_instance"), MicPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'material_instance'.")); }
+		if (!Args->TryGetStringField(TEXT("parameter"), ParamName))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'parameter'.")); }
+		if (!Args->TryGetStringField(TEXT("type"), Type))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'type' (scalar/vector/texture/switch).")); }
+		if (!Args->TryGetStringField(TEXT("value"), Value))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'value'.")); }
+
+		FString Err;
+		UMaterialInstanceConstant* MIC = ResolveMaterialInstance(MicPath, Err);
+		if (!MIC) { return FAgentMcpToolResult::Error(Err); }
+		const FName Param(*ParamName);
+
+		if (Type.Equals(TEXT("scalar"), ESearchCase::IgnoreCase))
+		{
+			UMaterialEditingLibrary::SetMaterialInstanceScalarParameterValue(MIC, Param, FCString::Atof(*Value));
+		}
+		else if (Type.Equals(TEXT("vector"), ESearchCase::IgnoreCase))
+		{
+			FLinearColor Color;
+			if (!Color.InitFromString(Value))
+				{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Could not parse vector '%s'. Use (R=..,G=..,B=..,A=..)."), *Value)); }
+			UMaterialEditingLibrary::SetMaterialInstanceVectorParameterValue(MIC, Param, Color);
+		}
+		else if (Type.Equals(TEXT("texture"), ESearchCase::IgnoreCase))
+		{
+			UTexture* Tex = LoadObject<UTexture>(nullptr, *Value);
+			if (!Tex)
+				{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Texture not found: '%s'."), *Value)); }
+			UMaterialEditingLibrary::SetMaterialInstanceTextureParameterValue(MIC, Param, Tex);
+		}
+		else if (Type.Equals(TEXT("switch"), ESearchCase::IgnoreCase))
+		{
+			UMaterialEditingLibrary::SetMaterialInstanceStaticSwitchParameterValue(MIC, Param, Value.ToBool());
+		}
+		else
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(TEXT("Unknown type '%s'. Use scalar/vector/texture/switch."), *Type));
+		}
+
+		UMaterialEditingLibrary::UpdateMaterialInstance(MIC);
+		MIC->MarkPackageDirty();
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetBoolField(TEXT("ok"), true);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
+
+	FAgentMcpToolResult HandleDescribeMaterialInstance(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString MicPath;
+		if (!Args->TryGetStringField(TEXT("material_instance"), MicPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'material_instance'.")); }
+		FString Err;
+		UMaterialInstanceConstant* MIC = ResolveMaterialInstance(MicPath, Err);
+		if (!MIC) { return FAgentMcpToolResult::Error(Err); }
+
+		const TSharedRef<FJsonObject> Scalars = MakeShared<FJsonObject>();
+		TArray<FName> ScalarNames;
+		UMaterialEditingLibrary::GetScalarParameterNames(MIC, ScalarNames);
+		for (const FName& N : ScalarNames)
+		{
+			Scalars->SetNumberField(N.ToString(), UMaterialEditingLibrary::GetMaterialInstanceScalarParameterValue(MIC, N));
+		}
+
+		const TSharedRef<FJsonObject> Vectors = MakeShared<FJsonObject>();
+		TArray<FName> VectorNames;
+		UMaterialEditingLibrary::GetVectorParameterNames(MIC, VectorNames);
+		for (const FName& N : VectorNames)
+		{
+			Vectors->SetStringField(N.ToString(), UMaterialEditingLibrary::GetMaterialInstanceVectorParameterValue(MIC, N).ToString());
+		}
+
+		const TSharedRef<FJsonObject> Textures = MakeShared<FJsonObject>();
+		TArray<FName> TextureNames;
+		UMaterialEditingLibrary::GetTextureParameterNames(MIC, TextureNames);
+		for (const FName& N : TextureNames)
+		{
+			UTexture* Tex = UMaterialEditingLibrary::GetMaterialInstanceTextureParameterValue(MIC, N);
+			Textures->SetStringField(N.ToString(), Tex ? Tex->GetPathName() : FString());
+		}
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetStringField(TEXT("material_instance"), MIC->GetPathName());
+		Out->SetStringField(TEXT("parent"), MIC->Parent ? MIC->Parent->GetPathName() : FString());
+		Out->SetObjectField(TEXT("scalars"), Scalars);
+		Out->SetObjectField(TEXT("vectors"), Vectors);
+		Out->SetObjectField(TEXT("textures"), Textures);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
+
+	FAgentMcpToolResult HandleAssignMaterial(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString ActorPath, MatPath, CompName;
+		if (!Args->TryGetStringField(TEXT("actor_path"), ActorPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'actor_path' (from spawn_actor/query_actors).")); }
+		if (!Args->TryGetStringField(TEXT("material"), MatPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'material'.")); }
+		Args->TryGetStringField(TEXT("component"), CompName);
+
+		AActor* Actor = FindObject<AActor>(nullptr, *ActorPath);
+		if (!Actor || !IsValid(Actor))
+			{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Actor not found: '%s'. Call query_actors for live paths."), *ActorPath)); }
+		UWorld* EditorWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
+		if (!EditorWorld || Actor->GetWorld() != EditorWorld)
+			{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Actor '%s' is not in the editor world (PIE/preview actor?)."), *ActorPath)); }
+
+		FString Err;
+		UMaterialInterface* Mat = ResolveMaterialInterface(MatPath, Err);
+		if (!Mat) { return FAgentMcpToolResult::Error(Err); }
+
+		TArray<UMeshComponent*> Meshes;
+		Actor->GetComponents<UMeshComponent>(Meshes);
+		UMeshComponent* Mesh = nullptr;
+		if (!CompName.IsEmpty())
+		{
+			for (UMeshComponent* M : Meshes)
+			{
+				if (M && M->GetName() == CompName) { Mesh = M; break; }
+			}
+			if (!Mesh)
+				{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("No mesh component named '%s' on the actor."), *CompName)); }
+		}
+		else
+		{
+			Mesh = Meshes.Num() > 0 ? Meshes[0] : nullptr;
+			if (!Mesh)
+				{ return FAgentMcpToolResult::Error(TEXT("Actor has no UMeshComponent to assign a material to.")); }
+		}
+
+		double SlotD = 0.0;
+		Args->TryGetNumberField(TEXT("slot_index"), SlotD);
+		const int32 Slot = static_cast<int32>(SlotD);
+
+		Mesh->SetMaterial(Slot, Mat);
+		Mesh->MarkRenderStateDirty();
+		Actor->MarkPackageDirty();
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetBoolField(TEXT("ok"), true);
+		Out->SetStringField(TEXT("component"), Mesh->GetName());
+		Out->SetNumberField(TEXT("slot_index"), Slot);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
+
 	void RegisterOne(const TCHAR* Name, const FString& Desc,
 		const TArray<TPair<FString, TSharedRef<FJsonObject>>>& Props, const TArray<FString>& Required,
 		FAgentMcpToolResult (*Fn)(const TSharedPtr<FJsonObject>&))
@@ -452,5 +676,33 @@ namespace AgentMcp::Tools
 			TEXT("Reads a material graph directly from the asset (works headless): {expression_count, expressions:[{node_id,class,pos_x,pos_y}], edges:[{from,to,to_input}], properties:{BaseColor:node_id,…}}. Use for verification and to recover node ids."),
 			{ { TEXT("material"), TypedProp(TEXT("string"), TEXT("/Game path of the Material.")) } },
 			{ TEXT("material") }, &HandleDescribeMaterial);
+
+		RegisterOne(TEXT("create_material_instance"),
+			TEXT("Creates a UMaterialInstanceConstant under /Game parented to a Material or Material Instance. Returns {object_path, package_path, parent}. Set overrides with set_material_instance_parameter."),
+			{ { TEXT("name"), TypedProp(TEXT("string"), TEXT("Asset name, e.g. MI_Glow_Red.")) },
+			  { TEXT("destination_path"), TypedProp(TEXT("string"), TEXT("/Game folder.")) },
+			  { TEXT("parent"), TypedProp(TEXT("string"), TEXT("/Game path of the parent Material or Material Instance.")) } },
+			{ TEXT("name"), TEXT("destination_path"), TEXT("parent") }, &HandleCreateMaterialInstance);
+
+		RegisterOne(TEXT("set_material_instance_parameter"),
+			TEXT("Overrides a parameter on a Material Instance. type = scalar (value=float), vector (value=(R=..,G=..,B=..,A=..)), texture (value=/Game texture path), or switch (value=true/false). Returns {ok}."),
+			{ { TEXT("material_instance"), TypedProp(TEXT("string"), TEXT("/Game path of the Material Instance.")) },
+			  { TEXT("parameter"), TypedProp(TEXT("string"), TEXT("Parameter name on the parent material.")) },
+			  { TEXT("type"), TypedProp(TEXT("string"), TEXT("scalar | vector | texture | switch.")) },
+			  { TEXT("value"), TypedProp(TEXT("string"), TEXT("Value string; format depends on type.")) } },
+			{ TEXT("material_instance"), TEXT("parameter"), TEXT("type"), TEXT("value") }, &HandleSetMaterialInstanceParameter);
+
+		RegisterOne(TEXT("describe_material_instance"),
+			TEXT("Reads a Material Instance's parent and overridable parameters: {parent, scalars:{name:value}, vectors:{name:'(R=..)'}, textures:{name:path}}."),
+			{ { TEXT("material_instance"), TypedProp(TEXT("string"), TEXT("/Game path of the Material Instance.")) } },
+			{ TEXT("material_instance") }, &HandleDescribeMaterialInstance);
+
+		RegisterOne(TEXT("assign_material"),
+			TEXT("Assigns a Material or Material Instance to a placed editor-world actor's mesh component slot. component defaults to the actor's first UMeshComponent; slot_index defaults to 0. Returns {ok, component, slot_index}."),
+			{ { TEXT("actor_path"), TypedProp(TEXT("string"), TEXT("Actor object path from spawn_actor/query_actors.")) },
+			  { TEXT("material"), TypedProp(TEXT("string"), TEXT("/Game path of the Material or Material Instance.")) },
+			  { TEXT("component"), TypedProp(TEXT("string"), TEXT("Mesh component name (optional; default first mesh component).")) },
+			  { TEXT("slot_index"), TypedProp(TEXT("number"), TEXT("Material slot index (optional, default 0).")) } },
+			{ TEXT("actor_path"), TEXT("material") }, &HandleAssignMaterial);
 	}
 }
