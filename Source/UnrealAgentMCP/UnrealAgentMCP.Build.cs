@@ -41,6 +41,7 @@ public class UnrealAgentMCP : ModuleRules
 			"IKRig",
 			"IKRigEditor",
 			"AnimationBlueprintLibrary",
+			"MaterialEditor",
 		});
 	}
 }
