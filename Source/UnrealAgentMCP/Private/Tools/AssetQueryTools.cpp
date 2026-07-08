@@ -1,8 +1,10 @@
 #include "Tools/AssetQueryTools.h"
 
+#include "AssetCompilingManager.h"
 #include "AssetRegistry/AssetData.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "AssetRegistry/IAssetRegistry.h"
+#include "ShaderCompiler.h"
 #include "Core/AgentMcpToolRegistry.h"
 #include "Core/McpTypes.h"
 #include "Dom/JsonObject.h"
@@ -446,6 +448,17 @@ namespace
 		{
 			return FAgentMcpToolResult::Error(FString::Printf(
 				TEXT("Asset not found: '%s' (neither loaded in memory nor in the asset registry)."), *AssetPath));
+		}
+
+		// Drain outstanding async compilation before the force-delete. Background compile
+		// tasks (material shader maps, Niagara script/DDC builds) that outlive their asset
+		// crashed two headless runs (SparseArray/BitArray asserts on TargetPlatform background
+		// workers) when the delete freed the asset under them — the race is timing-dependent,
+		// so the drain lives here at the one destructive chokepoint rather than per asset type.
+		FAssetCompilingManager::Get().FinishAllCompilation();
+		if (GShaderCompilingManager)
+		{
+			GShaderCompilingManager->FinishAllCompilation();
 		}
 
 		// Prefer the loaded-object route: handles in-memory-only assets that were never saved to disk.

@@ -11,6 +11,8 @@
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
 #include "NiagaraComponent.h"
+#include "NiagaraEditorUtilities.h"
+#include "NiagaraEmitter.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
 #include "Tools/McpToolUtils.h"
@@ -50,6 +52,26 @@ namespace
 	FString NormalizeUserParamName(const FString& InName)
 	{
 		return InName.StartsWith(TEXT("User.")) ? InName : TEXT("User.") + InName;
+	}
+
+	UNiagaraEmitter* ResolveNiagaraEmitter(const FString& Path, FString& OutError)
+	{
+		UNiagaraEmitter* Em = FindObject<UNiagaraEmitter>(nullptr, *Path);
+		if (!Em)
+		{
+			FString Pkg = Path;
+			int32 Dot = INDEX_NONE;
+			if (Pkg.FindChar(TEXT('.'), Dot)) { Pkg = Pkg.Left(Dot); }
+			const FString ObjPath = Pkg + TEXT(".") + FPackageName::GetShortName(Pkg);
+			Em = FindObject<UNiagaraEmitter>(nullptr, *ObjPath);
+			if (!Em) { Em = LoadObject<UNiagaraEmitter>(nullptr, *ObjPath); }
+		}
+		if (!Em)
+		{
+			OutError = FString::Printf(
+				TEXT("NiagaraEmitter not found: '%s'. Engine templates live under /Niagara/DefaultAssets/Templates/Emitters (e.g. Fountain)."), *Path);
+		}
+		return Em;
 	}
 
 	FAgentMcpToolResult HandleCreateNiagaraSystem(const TSharedPtr<FJsonObject>& Args)
@@ -277,6 +299,50 @@ namespace
 		Out->SetStringField(TEXT("system"), Sys->GetPathName());
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
 	}
+
+	// M4: emitter assembly from a source emitter asset. Uses the exported static
+	// FNiagaraEditorUtilities::AddEmitterToSystem (the same call UNiagaraSystemFactoryNew
+	// uses to seed systems from emitters) — NOT the editor ViewModel path the design
+	// flagged as fragile, so this landed as a real API call rather than best-effort.
+	FAgentMcpToolResult HandleAddNiagaraEmitter(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString SysPath, EmitterPath;
+		if (!Args->TryGetStringField(TEXT("system"), SysPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'system'.")); }
+		if (!Args->TryGetStringField(TEXT("source_emitter"), EmitterPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'source_emitter' (a UNiagaraEmitter asset, e.g. /Niagara/DefaultAssets/Templates/Emitters/Fountain).")); }
+
+		FString Err;
+		UNiagaraSystem* Sys = ResolveNiagaraSystem(SysPath, Err);
+		if (!Sys) { return FAgentMcpToolResult::Error(Err); }
+		UNiagaraEmitter* Emitter = ResolveNiagaraEmitter(EmitterPath, Err);
+		if (!Emitter) { return FAgentMcpToolResult::Error(Err); }
+
+		const FGuid Version = Emitter->GetExposedVersion().VersionGuid;
+		const FGuid HandleId = FNiagaraEditorUtilities::AddEmitterToSystem(
+			*Sys, *Emitter, Version, /*bCreateCopy=*/true);
+
+		// Same quiescence contract as create_niagara_system: the add re-requests
+		// compilation — block so no background task outlives the tool call.
+		Sys->WaitForCompilationComplete(/*bIncludingGPUShaders=*/true, /*bShowProgress=*/false);
+		Sys->MarkPackageDirty();
+
+		FString HandleName;
+		for (const FNiagaraEmitterHandle& Handle : Sys->GetEmitterHandles())
+		{
+			if (Handle.GetId() == HandleId) { HandleName = Handle.GetName().ToString(); break; }
+		}
+		if (HandleName.IsEmpty())
+			{ return FAgentMcpToolResult::Error(TEXT("AddEmitterToSystem returned no matching emitter handle — the add did not take.")); }
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetBoolField(TEXT("ok"), true);
+		Out->SetStringField(TEXT("emitter_handle"), HandleName);
+		Out->SetStringField(TEXT("handle_id"), HandleId.ToString());
+		Out->SetNumberField(TEXT("emitter_count"), Sys->GetEmitterHandles().Num());
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
 }
 
 namespace AgentMcp::Tools
@@ -311,5 +377,11 @@ namespace AgentMcp::Tools
 			  { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem to assign.")) },
 			  { TEXT("component_name"), TypedProp(TEXT("string"), TEXT("Component name (optional; auto-generated).")) } },
 			{ TEXT("actor_path"), TEXT("system") }, &HandlePlaceNiagaraComponent);
+
+		RegisterOne(TEXT("add_niagara_emitter"),
+			TEXT("Adds an emitter to a NiagaraSystem by copying a source UNiagaraEmitter asset (engine templates: /Niagara/DefaultAssets/Templates/Emitters/Fountain, SimpleSpriteBurst, UpwardMeshBurst). The handle keeps the source emitter's name (dedup-suffixed). Blocks until the system recompiles. Returns {ok, emitter_handle, handle_id, emitter_count}."),
+			{ { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem.")) },
+			  { TEXT("source_emitter"), TypedProp(TEXT("string"), TEXT("Path of the source UNiagaraEmitter asset to copy in.")) } },
+			{ TEXT("system"), TEXT("source_emitter") }, &HandleAddNiagaraEmitter);
 	}
 }

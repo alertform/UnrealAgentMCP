@@ -31,6 +31,9 @@ namespace
 	constexpr const TCHAR* KNiaRTPath        = TEXT("/Game/__McpTests/NS_McpNiagaraRT");
 	constexpr const TCHAR* KNiaRTDiffPkgPath = TEXT("/Temp/McpNiagaraRT_ReloadCheck");
 	constexpr const TCHAR* KNiaPlacePath     = TEXT("/Game/__McpTests/NS_McpNiagaraPlace");
+	constexpr const TCHAR* KNiaEmitPath      = TEXT("/Game/__McpTests/NS_McpEmitterRT");
+	constexpr const TCHAR* KNiaEmitDiffPkgPath = TEXT("/Temp/McpEmitterRT_ReloadCheck");
+	constexpr const TCHAR* KNiaStockEmitter  = TEXT("/Niagara/DefaultAssets/Templates/Emitters/Fountain");
 
 	void NiaEvictDiffPackage(const TCHAR* DiffPkgPath)
 	{
@@ -206,6 +209,74 @@ bool FNiagaraCreateOutsideGameTest::RunTest(const FString& Parameters)
 
 	TestTrue(TEXT("create_niagara_system into /Engine is a tool error"), bIsError);
 	TestTrue(TEXT("error names /Game"), RawText.Contains(TEXT("/Game")));
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// M4 persistence gate: add the stock Fountain emitter to a fresh system, save,
+// re-read the bytes (LOAD_ForDiff) and assert the emitter handle survived.
+// Green is the ship condition for add_niagara_emitter (design §6.2).
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FAddNiagaraEmitterRoundTripTest,
+	"UnrealAgentMCP.NiagaraTools.AddEmitterRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FAddNiagaraEmitterRoundTripTest::RunTest(const FString& Parameters)
+{
+	ON_SCOPE_EXIT
+	{
+		NiaEvictDiffPackage(KNiaEmitDiffPkgPath);
+		NiaDeleteGameAsset(*this, KNiaEmitPath);
+	};
+
+	bool bErr = false;
+	const FString Sys = FString(KNiaEmitPath);
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_niagara_system"),
+		TEXT("{\"name\":\"NS_McpEmitterRT\",\"destination_path\":\"/Game/__McpTests\"}"), bErr);
+	if (!TestFalse(TEXT("create_niagara_system not error"), bErr)) { return false; }
+
+	const TSharedPtr<FJsonObject> AddRes = AgentMcpTestUtils::CallTool(*this, TEXT("add_niagara_emitter"),
+		FString::Printf(TEXT("{\"system\":\"%s\",\"source_emitter\":\"%s\"}"), *Sys, KNiaStockEmitter), bErr);
+	if (!TestFalse(TEXT("add_niagara_emitter not error"), bErr)) { return false; }
+
+	FString HandleName;
+	if (TestTrue(TEXT("add returned JSON"), AddRes.IsValid()))
+	{
+		AddRes->TryGetStringField(TEXT("emitter_handle"), HandleName);
+		TestTrue(TEXT("emitter_handle named"), !HandleName.IsEmpty());
+		double Count = 0.0;
+		TestTrue(TEXT("emitter_count == 1"),
+			AddRes->TryGetNumberField(TEXT("emitter_count"), Count) && static_cast<int32>(Count) == 1);
+	}
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("save_asset"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *Sys), bErr);
+	if (!TestFalse(TEXT("save_asset not error"), bErr)) { return false; }
+
+	// --- re-read the saved bytes into a /Temp diff package ---
+	const FString SrcFileName = FPackageName::LongPackageNameToFilename(KNiaEmitPath, FPackageName::GetAssetPackageExtension());
+	const FString TmpFileName = FPaths::ProjectSavedDir() + TEXT("McpEmitterRT_ReloadCheck.uasset");
+	if (!TestTrue(TEXT("copy saved package to /Temp"), IFileManager::Get().Copy(*TmpFileName, *SrcFileName) == COPY_OK)) { return false; }
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*TmpFileName, false, true, true); };
+
+	const FPackagePath TempPath = FPackagePath::FromLocalPath(TmpFileName);
+	const FPackagePath OrigPath = FPackagePath::FromLocalPath(SrcFileName);
+	FLinkerInstancingContext Ctx;
+	Ctx.AddPackageMapping(OrigPath.GetPackageFName(), TempPath.GetPackageFName());
+	UPackage* LoadedPkg = LoadPackage(nullptr, *TempPath.GetPackageName(),
+		LOAD_ForDiff | LOAD_DisableCompileOnLoad | LOAD_DisableEngineVersionChecks, nullptr, &Ctx);
+	if (!TestNotNull(TEXT("package re-loaded from disk bytes"), LoadedPkg)) { return false; }
+
+	UNiagaraSystem* Reloaded = FindObject<UNiagaraSystem>(LoadedPkg, *FPackageName::GetShortName(KNiaEmitPath));
+	if (!TestNotNull(TEXT("system found in re-loaded package"), Reloaded)) { return false; }
+
+	TestEqual(TEXT("emitter handle survives save->reload"), Reloaded->GetEmitterHandles().Num(), 1);
+	if (Reloaded->GetEmitterHandles().Num() == 1)
+	{
+		TestEqual(TEXT("handle keeps the source emitter's name"),
+			Reloaded->GetEmitterHandles()[0].GetName().ToString(), HandleName);
+	}
+
 	return true;
 }
 
