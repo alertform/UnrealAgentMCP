@@ -22,6 +22,7 @@
 #include "Tools/AnimGraphTools.h"
 #include "Tools/RetargetTools.h"
 #include "Tools/MaterialTools.h"
+#include "Tools/NiagaraTools.h"
 
 DEFINE_LOG_CATEGORY(LogAgentMcp);
 
@@ -49,6 +50,7 @@ void FUnrealAgentMCPModule::StartupModule()
 	AgentMcp::Tools::RegisterAnimGraphTools();
 	AgentMcp::Tools::RegisterRetargetTools();
 	AgentMcp::Tools::RegisterMaterialTools();
+	AgentMcp::Tools::RegisterNiagaraTools();
 	UE_LOG(LogAgentMcp, Display, TEXT("UnrealAgentMCP: registered %d tools"), FAgentMcpToolRegistry::Get().Num());
 	GLog->AddOutputDevice(&FAgentMcpLogCapture::Get());
 

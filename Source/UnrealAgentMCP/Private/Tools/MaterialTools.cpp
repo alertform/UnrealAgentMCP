@@ -174,27 +174,8 @@ namespace
 		return MIC;
 	}
 
-	// ── schema sugar (keeps registrations to a few lines each) ────────────────────
-	TSharedRef<FJsonObject> TypedProp(const TCHAR* Type, const FString& Desc)
-	{
-		TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
-		P->SetStringField(TEXT("type"), Type);
-		P->SetStringField(TEXT("description"), Desc);
-		return P;
-	}
-	TSharedPtr<FJsonObject> MakeSchema(
-		const TArray<TPair<FString, TSharedRef<FJsonObject>>>& Props, const TArray<FString>& Required)
-	{
-		TSharedPtr<FJsonObject> Schema = MakeShared<FJsonObject>();
-		Schema->SetStringField(TEXT("type"), TEXT("object"));
-		TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
-		for (const TPair<FString, TSharedRef<FJsonObject>>& Pair : Props) { P->SetObjectField(Pair.Key, Pair.Value); }
-		Schema->SetObjectField(TEXT("properties"), P);
-		TArray<TSharedPtr<FJsonValue>> Req;
-		for (const FString& R : Required) { Req.Add(MakeShared<FJsonValueString>(R)); }
-		Schema->SetArrayField(TEXT("required"), Req);
-		return Schema;
-	}
+	// Schema sugar (TypedProp/MakeSchema/RegisterOne) lives in Tools/McpToolUtils.h —
+	// shared namespace-qualified inlines, not per-file anonymous copies (P6 unity C2084).
 
 	// ── handlers ─────────────────────────────────────────────────────────────────
 	FAgentMcpToolResult HandleCreateMaterial(const TSharedPtr<FJsonObject>& Args)
@@ -610,24 +591,15 @@ namespace
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
 	}
 
-	void RegisterOne(const TCHAR* Name, const FString& Desc,
-		const TArray<TPair<FString, TSharedRef<FJsonObject>>>& Props, const TArray<FString>& Required,
-		FAgentMcpToolResult (*Fn)(const TSharedPtr<FJsonObject>&))
-	{
-		FAgentMcpToolDef Def;
-		Def.Name = Name;
-		Def.Description = Desc;
-		Def.InputSchema = MakeSchema(Props, Required);
-		Def.Tier = EAgentMcpTier::SafeWrite;
-		Def.Handler = FAgentMcpToolHandler::CreateStatic(Fn);
-		FAgentMcpToolRegistry::Get().Register(MoveTemp(Def));
-	}
 }
 
 namespace AgentMcp::Tools
 {
 	void RegisterMaterialTools()
 	{
+		using ToolUtils::RegisterOne;
+		using ToolUtils::TypedProp;
+
 		RegisterOne(TEXT("create_material"),
 			TEXT("Creates a new UMaterial asset under /Game and returns {object_path, package_path}. Add nodes with add_material_expression, wire them with connect_material_*, then recompile_material. Save with save_asset."),
 			{ { TEXT("name"), TypedProp(TEXT("string"), TEXT("Asset name, e.g. M_Glow.")) },

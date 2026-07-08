@@ -42,6 +42,8 @@ public class UnrealAgentMCP : ModuleRules
 			"IKRigEditor",
 			"AnimationBlueprintLibrary",
 			"MaterialEditor",
+			"Niagara",
+			"NiagaraEditor",
 		});
 	}
 }
