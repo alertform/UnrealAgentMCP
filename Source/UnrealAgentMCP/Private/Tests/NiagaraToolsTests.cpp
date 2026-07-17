@@ -15,6 +15,9 @@
 #include "Misc/Paths.h"
 #include "Misc/ScopeExit.h"
 #include "NiagaraComponent.h"
+#include "NiagaraEmitter.h"
+#include "NiagaraEmitterHandle.h"
+#include "NiagaraScript.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
 #include "Tests/AgentMcpTestHelpers.h"
@@ -34,6 +37,9 @@ namespace
 	constexpr const TCHAR* KNiaEmitPath      = TEXT("/Game/__McpTests/NS_McpEmitterRT");
 	constexpr const TCHAR* KNiaEmitDiffPkgPath = TEXT("/Temp/McpEmitterRT_ReloadCheck");
 	constexpr const TCHAR* KNiaStockEmitter  = TEXT("/Niagara/DefaultAssets/Templates/Emitters/Fountain");
+	constexpr const TCHAR* KNiaModPath       = TEXT("/Game/__McpTests/NS_McpModuleRT");
+	constexpr const TCHAR* KNiaModDiffPkgPath = TEXT("/Temp/McpModuleRT_ReloadCheck");
+	constexpr const TCHAR* KNiaBurstEmitter  = TEXT("/Niagara/DefaultAssets/Templates/Emitters/SimpleSpriteBurst");
 
 	void NiaEvictDiffPackage(const TCHAR* DiffPkgPath)
 	{
@@ -276,6 +282,124 @@ bool FAddNiagaraEmitterRoundTripTest::RunTest(const FString& Parameters)
 		TestEqual(TEXT("handle keeps the source emitter's name"),
 			Reloaded->GetEmitterHandles()[0].GetName().ToString(), HandleName);
 	}
+
+	return true;
+}
+
+// ---------------------------------------------------------------------------
+// N2 persistence gate: list a stock emitter's rapid-iteration module inputs,
+// set the first LinearColor one (fallback: first float), verify via re-list,
+// save, then re-read the bytes and assert the value survived in the scripts'
+// RapidIterationParameters stores.
+// ---------------------------------------------------------------------------
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FSetNiagaraModuleInputRoundTripTest,
+	"UnrealAgentMCP.NiagaraTools.ModuleInputRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+bool FSetNiagaraModuleInputRoundTripTest::RunTest(const FString& Parameters)
+{
+	ON_SCOPE_EXIT
+	{
+		NiaEvictDiffPackage(KNiaModDiffPkgPath);
+		NiaDeleteGameAsset(*this, KNiaModPath);
+	};
+
+	bool bErr = false;
+	const FString Sys = FString(KNiaModPath);
+
+	AgentMcpTestUtils::CallTool(*this, TEXT("create_niagara_system"),
+		TEXT("{\"name\":\"NS_McpModuleRT\",\"destination_path\":\"/Game/__McpTests\"}"), bErr);
+	if (!TestFalse(TEXT("create system not error"), bErr)) { return false; }
+	AgentMcpTestUtils::CallTool(*this, TEXT("add_niagara_emitter"),
+		FString::Printf(TEXT("{\"system\":\"%s\",\"source_emitter\":\"%s\"}"), *Sys, KNiaBurstEmitter), bErr);
+	if (!TestFalse(TEXT("add emitter not error"), bErr)) { return false; }
+
+	// --- list & pick an editable input (prefer LinearColor, fallback float) ---
+	const TSharedPtr<FJsonObject> ListRes = AgentMcpTestUtils::CallTool(*this, TEXT("list_niagara_module_inputs"),
+		FString::Printf(TEXT("{\"system\":\"%s\"}"), *Sys), bErr);
+	if (!TestFalse(TEXT("list not error"), bErr) || !TestTrue(TEXT("list returned JSON"), ListRes.IsValid())) { return false; }
+
+	const TArray<TSharedPtr<FJsonValue>>* Inputs = nullptr;
+	if (!TestTrue(TEXT("module_inputs present"), ListRes->TryGetArrayField(TEXT("module_inputs"), Inputs))) { return false; }
+	if (!TestTrue(TEXT("template exposes at least one editable input"), Inputs->Num() > 0)) { return false; }
+
+	FString ColorName, FloatName;
+	for (const TSharedPtr<FJsonValue>& V : *Inputs)
+	{
+		const TSharedPtr<FJsonObject> P = V->AsObject();
+		if (!P.IsValid()) { continue; }
+		const FString TypeName = P->GetStringField(TEXT("type"));
+		if (ColorName.IsEmpty() && TypeName.Contains(TEXT("LinearColor"))) { ColorName = P->GetStringField(TEXT("name")); }
+		if (FloatName.IsEmpty() && TypeName.Equals(TEXT("float"), ESearchCase::IgnoreCase)) { FloatName = P->GetStringField(TEXT("name")); }
+	}
+	const bool bUseColor = !ColorName.IsEmpty();
+	const FString TargetName = bUseColor ? ColorName : FloatName;
+	if (!TestTrue(TEXT("found a color or float input to edit"), !TargetName.IsEmpty())) { return false; }
+	const FString NewValue = bUseColor ? TEXT("(R=0.25,G=0.01,B=0.01,A=1.0)") : TEXT("123.5");
+
+	// --- set by exact name ---
+	const TSharedPtr<FJsonObject> SetRes = AgentMcpTestUtils::CallTool(*this, TEXT("set_niagara_module_input"),
+		FString::Printf(TEXT("{\"system\":\"%s\",\"parameter\":\"%s\",\"value\":\"%s\"}"), *Sys, *TargetName, *NewValue), bErr);
+	if (!TestFalse(TEXT("set not error"), bErr) || !TestTrue(TEXT("set returned JSON"), SetRes.IsValid())) { return false; }
+	double Updated = 0.0;
+	TestTrue(TEXT("at least one script updated"),
+		SetRes->TryGetNumberField(TEXT("scripts_updated"), Updated) && Updated >= 1.0);
+
+	// --- save + reload bytes, then read the store directly ---
+	AgentMcpTestUtils::CallTool(*this, TEXT("save_asset"),
+		FString::Printf(TEXT("{\"asset_path\":\"%s\"}"), *Sys), bErr);
+	if (!TestFalse(TEXT("save_asset not error"), bErr)) { return false; }
+
+	const FString SrcFileName = FPackageName::LongPackageNameToFilename(KNiaModPath, FPackageName::GetAssetPackageExtension());
+	const FString TmpFileName = FPaths::ProjectSavedDir() + TEXT("McpModuleRT_ReloadCheck.uasset");
+	if (!TestTrue(TEXT("copy saved package to /Temp"), IFileManager::Get().Copy(*TmpFileName, *SrcFileName) == COPY_OK)) { return false; }
+	ON_SCOPE_EXIT { IFileManager::Get().Delete(*TmpFileName, false, true, true); };
+
+	const FPackagePath TempPath = FPackagePath::FromLocalPath(TmpFileName);
+	const FPackagePath OrigPath = FPackagePath::FromLocalPath(SrcFileName);
+	FLinkerInstancingContext Ctx;
+	Ctx.AddPackageMapping(OrigPath.GetPackageFName(), TempPath.GetPackageFName());
+	UPackage* LoadedPkg = LoadPackage(nullptr, *TempPath.GetPackageName(),
+		LOAD_ForDiff | LOAD_DisableCompileOnLoad | LOAD_DisableEngineVersionChecks, nullptr, &Ctx);
+	if (!TestNotNull(TEXT("package re-loaded from disk bytes"), LoadedPkg)) { return false; }
+	UNiagaraSystem* Reloaded = FindObject<UNiagaraSystem>(LoadedPkg, *FPackageName::GetShortName(KNiaModPath));
+	if (!TestNotNull(TEXT("system found in re-loaded package"), Reloaded)) { return false; }
+
+	// Sweep every script store for the edited parameter and assert the new value.
+	TArray<UNiagaraScript*> AllScripts;
+	if (UNiagaraScript* S = Reloaded->GetSystemSpawnScript()) { AllScripts.Add(S); }
+	if (UNiagaraScript* S = Reloaded->GetSystemUpdateScript()) { AllScripts.Add(S); }
+	for (const FNiagaraEmitterHandle& Handle : Reloaded->GetEmitterHandles())
+	{
+		if (FVersionedNiagaraEmitterData* Data = Handle.GetEmitterData())
+		{
+			TArray<UNiagaraScript*> EmitterScripts;
+			Data->GetScripts(EmitterScripts, /*bCompilableOnly=*/false);
+			AllScripts.Append(EmitterScripts);
+		}
+	}
+
+	bool bFoundPersisted = false;
+	for (UNiagaraScript* Script : AllScripts)
+	{
+		if (!Script) { continue; }
+		TArray<FNiagaraVariable> Vars;
+		Script->RapidIterationParameters.GetParameters(Vars);
+		for (const FNiagaraVariable& Var : Vars)
+		{
+			if (!Var.GetName().ToString().Equals(TargetName, ESearchCase::IgnoreCase)) { continue; }
+			if (bUseColor)
+			{
+				const FLinearColor V = Script->RapidIterationParameters.GetParameterValue<FLinearColor>(Var);
+				if (V.Equals(FLinearColor(0.25f, 0.01f, 0.01f, 1.0f), 0.001f)) { bFoundPersisted = true; }
+			}
+			else
+			{
+				const float V = Script->RapidIterationParameters.GetParameterValue<float>(Var);
+				if (FMath::IsNearlyEqual(V, 123.5f, 0.001f)) { bFoundPersisted = true; }
+			}
+		}
+	}
+	TestTrue(TEXT("module input value survives save->reload"), bFoundPersisted);
 
 	return true;
 }

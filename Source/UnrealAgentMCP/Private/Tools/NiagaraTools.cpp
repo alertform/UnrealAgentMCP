@@ -13,6 +13,8 @@
 #include "NiagaraComponent.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEmitter.h"
+#include "NiagaraEmitterHandle.h"
+#include "NiagaraScript.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
 #include "Tools/McpToolUtils.h"
@@ -343,6 +345,248 @@ namespace
 		Out->SetNumberField(TEXT("emitter_count"), Sys->GetEmitterHandles().Num());
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
 	}
+
+	// -----------------------------------------------------------------------
+	// N2: module-input editing via Rapid Iteration parameters. Module inputs a
+	// template author touched live as "Constants.<...>.<Module>.<Input>" entries
+	// in the owning script's RapidIterationParameters store — runtime reads the
+	// store directly (that is what makes them "rapid"), so writing the store +
+	// saving the asset changes the effect with NO graph surgery and NO recompile.
+	// Inputs still at script default have no store entry: list shows what IS
+	// editable; set edits existing entries only (bAdd would desync the graph).
+	// -----------------------------------------------------------------------
+
+	void GatherRapidIterationScripts(UNiagaraSystem* Sys,
+		TArray<TPair<FString, UNiagaraScript*>>& Out)
+	{
+		if (UNiagaraScript* S = Sys->GetSystemSpawnScript()) { Out.Emplace(TEXT("System"), S); }
+		if (UNiagaraScript* S = Sys->GetSystemUpdateScript()) { Out.Emplace(TEXT("System"), S); }
+		for (const FNiagaraEmitterHandle& Handle : Sys->GetEmitterHandles())
+		{
+			if (FVersionedNiagaraEmitterData* Data = Handle.GetEmitterData())
+			{
+				TArray<UNiagaraScript*> Scripts;
+				Data->GetScripts(Scripts, /*bCompilableOnly=*/false);
+				for (UNiagaraScript* S : Scripts)
+				{
+					if (S) { Out.Emplace(Handle.GetName().ToString(), S); }
+				}
+			}
+		}
+	}
+
+	/** float/int/bool/linearcolor/vec3/vec2 的存储字节 → JSON 值；其余类型标记 unsupported。 */
+	void WriteRapidIterationValue(const FNiagaraTypeDefinition& Type, const uint8* Data,
+		const TSharedRef<FJsonObject>& Obj)
+	{
+		if (!Data) { Obj->SetStringField(TEXT("value"), TEXT("<no data>")); return; }
+		if (Type == FNiagaraTypeDefinition::GetFloatDef())
+		{
+			float V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetNumberField(TEXT("value"), V);
+		}
+		else if (Type == FNiagaraTypeDefinition::GetIntDef())
+		{
+			int32 V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetNumberField(TEXT("value"), V);
+		}
+		else if (Type == FNiagaraTypeDefinition::GetBoolDef())
+		{
+			FNiagaraBool V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetBoolField(TEXT("value"), V.GetValue());
+		}
+		else if (Type == FNiagaraTypeDefinition::GetColorDef())
+		{
+			FLinearColor V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetStringField(TEXT("value"), V.ToString());
+		}
+		else if (Type == FNiagaraTypeDefinition::GetVec3Def())
+		{
+			FVector3f V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetStringField(TEXT("value"), FVector(V).ToString());
+		}
+		else if (Type == FNiagaraTypeDefinition::GetVec2Def())
+		{
+			FVector2f V; FMemory::Memcpy(&V, Data, sizeof(V));
+			Obj->SetStringField(TEXT("value"), FVector2D(V).ToString());
+		}
+		else
+		{
+			Obj->SetStringField(TEXT("value"), FString::Printf(TEXT("<unsupported:%s>"), *Type.GetName()));
+		}
+	}
+
+	FAgentMcpToolResult HandleListNiagaraModuleInputs(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString SysPath;
+		if (!Args->TryGetStringField(TEXT("system"), SysPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'system'.")); }
+		FString Err;
+		UNiagaraSystem* Sys = ResolveNiagaraSystem(SysPath, Err);
+		if (!Sys) { return FAgentMcpToolResult::Error(Err); }
+
+		TArray<TPair<FString, UNiagaraScript*>> Scripts;
+		GatherRapidIterationScripts(Sys, Scripts);
+
+		TArray<TSharedPtr<FJsonValue>> Inputs;
+		for (const TPair<FString, UNiagaraScript*>& Entry : Scripts)
+		{
+			FNiagaraParameterStore& Store = Entry.Value->RapidIterationParameters;
+			TArray<FNiagaraVariable> Vars;
+			Store.GetParameters(Vars);
+			for (const FNiagaraVariable& Var : Vars)
+			{
+				const TSharedRef<FJsonObject> P = MakeShared<FJsonObject>();
+				P->SetStringField(TEXT("emitter"), Entry.Key);
+				P->SetStringField(TEXT("name"), Var.GetName().ToString());
+				P->SetStringField(TEXT("type"), Var.GetType().GetName());
+				WriteRapidIterationValue(Var.GetType(), Store.GetParameterData(Var), P);
+				Inputs.Add(MakeShared<FJsonValueObject>(P));
+			}
+		}
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetStringField(TEXT("system"), Sys->GetPathName());
+		Out->SetNumberField(TEXT("count"), Inputs.Num());
+		Out->SetArrayField(TEXT("module_inputs"), Inputs);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
+
+	FAgentMcpToolResult HandleSetNiagaraModuleInput(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString SysPath, ParamQuery, Value;
+		if (!Args->TryGetStringField(TEXT("system"), SysPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'system'.")); }
+		if (!Args->TryGetStringField(TEXT("parameter"), ParamQuery))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'parameter' (name from list_niagara_module_inputs; suffix match allowed).")); }
+		if (!Args->TryGetStringField(TEXT("value"), Value))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'value'.")); }
+
+		FString Err;
+		UNiagaraSystem* Sys = ResolveNiagaraSystem(SysPath, Err);
+		if (!Sys) { return FAgentMcpToolResult::Error(Err); }
+
+		TArray<TPair<FString, UNiagaraScript*>> Scripts;
+		GatherRapidIterationScripts(Sys, Scripts);
+
+		// Match ladder: exact name → ".query" suffix → substring. The same input may
+		// legitimately live in several scripts (spawn+update copies) — that is ONE
+		// logical input; genuinely different names matching the query is ambiguity.
+		TSet<FString> MatchedNames;
+		TArray<TPair<UNiagaraScript*, FNiagaraVariable>> Targets;
+		auto CollectMatches = [&](auto Predicate)
+		{
+			MatchedNames.Reset();
+			Targets.Reset();
+			for (const TPair<FString, UNiagaraScript*>& Entry : Scripts)
+			{
+				TArray<FNiagaraVariable> Vars;
+				Entry.Value->RapidIterationParameters.GetParameters(Vars);
+				for (const FNiagaraVariable& Var : Vars)
+				{
+					const FString VarName = Var.GetName().ToString();
+					if (Predicate(VarName))
+					{
+						MatchedNames.Add(VarName);
+						Targets.Emplace(Entry.Value, Var);
+					}
+				}
+			}
+		};
+
+		CollectMatches([&](const FString& N) { return N.Equals(ParamQuery, ESearchCase::IgnoreCase); });
+		if (MatchedNames.Num() == 0)
+		{
+			CollectMatches([&](const FString& N) { return N.EndsWith(TEXT(".") + ParamQuery, ESearchCase::IgnoreCase); });
+		}
+		if (MatchedNames.Num() == 0)
+		{
+			CollectMatches([&](const FString& N) { return N.Contains(ParamQuery, ESearchCase::IgnoreCase); });
+		}
+
+		if (MatchedNames.Num() == 0)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("No rapid-iteration parameter matches '%s'. Call list_niagara_module_inputs for editable names (inputs still at script default have no entry)."), *ParamQuery));
+		}
+		if (MatchedNames.Num() > 1)
+		{
+			return FAgentMcpToolResult::Error(FString::Printf(
+				TEXT("Ambiguous parameter '%s' — candidates: %s. Pass a longer/exact name."),
+				*ParamQuery, *FString::Join(MatchedNames.Array(), TEXT(" | "))));
+		}
+
+		// Single logical input — write it in every script that carries a copy.
+		int32 NumSet = 0;
+		FString TypeName;
+		for (const TPair<UNiagaraScript*, FNiagaraVariable>& Target : Targets)
+		{
+			const FNiagaraTypeDefinition& Type = Target.Value.GetType();
+			TypeName = Type.GetName();
+			FNiagaraParameterStore& Store = Target.Key->RapidIterationParameters;
+			bool bSet = false;
+
+			if (Type == FNiagaraTypeDefinition::GetFloatDef())
+			{
+				const float V = FCString::Atof(*Value);
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else if (Type == FNiagaraTypeDefinition::GetIntDef())
+			{
+				const int32 V = FCString::Atoi(*Value);
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else if (Type == FNiagaraTypeDefinition::GetBoolDef())
+			{
+				FNiagaraBool V; V.SetValue(Value.ToBool());
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else if (Type == FNiagaraTypeDefinition::GetColorDef())
+			{
+				FLinearColor V;
+				if (!V.InitFromString(Value))
+					{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Could not parse linearcolor '%s'. Use (R=..,G=..,B=..,A=..)."), *Value)); }
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else if (Type == FNiagaraTypeDefinition::GetVec3Def())
+			{
+				FVector Parsed;
+				if (!Parsed.InitFromString(Value))
+					{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Could not parse vec3 '%s'. Use (X=..,Y=..,Z=..)."), *Value)); }
+				const FVector3f V(Parsed);
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else if (Type == FNiagaraTypeDefinition::GetVec2Def())
+			{
+				FVector2D Parsed;
+				if (!Parsed.InitFromString(Value))
+					{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("Could not parse vec2 '%s'. Use (X=..,Y=..)."), *Value)); }
+				const FVector2f V(Parsed);
+				bSet = Store.SetParameterData(reinterpret_cast<const uint8*>(&V), Target.Value);
+			}
+			else
+			{
+				return FAgentMcpToolResult::Error(FString::Printf(
+					TEXT("Parameter type '%s' is not editable by this tool (float/int/bool/linearcolor/vec3/vec2 only)."), *TypeName));
+			}
+
+			if (bSet) { ++NumSet; }
+		}
+
+		if (NumSet == 0)
+			{ return FAgentMcpToolResult::Error(TEXT("SetParameterData failed on every matching script — store rejected the write.")); }
+		Sys->MarkPackageDirty();
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetBoolField(TEXT("ok"), true);
+		Out->SetStringField(TEXT("parameter"), MatchedNames.Array()[0]);
+		Out->SetStringField(TEXT("type"), TypeName);
+		Out->SetNumberField(TEXT("scripts_updated"), NumSet);
+		Out->SetStringField(TEXT("note"), TEXT("Rapid-iteration value written; persist with save_asset."));
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
 }
 
 namespace AgentMcp::Tools
@@ -383,5 +627,17 @@ namespace AgentMcp::Tools
 			{ { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem.")) },
 			  { TEXT("source_emitter"), TypedProp(TEXT("string"), TEXT("Path of the source UNiagaraEmitter asset to copy in.")) } },
 			{ TEXT("system"), TEXT("source_emitter") }, &HandleAddNiagaraEmitter);
+
+		RegisterOne(TEXT("list_niagara_module_inputs"),
+			TEXT("Lists a NiagaraSystem's editable module inputs (rapid-iteration parameters) across system and emitter scripts: {module_inputs:[{emitter,name,type,value}]}. Names look like 'Constants.<Emitter>.<Module>.<Input>'. Inputs still at script default have no entry and are not editable via set_niagara_module_input."),
+			{ { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem.")) } },
+			{ TEXT("system") }, &HandleListNiagaraModuleInputs);
+
+		RegisterOne(TEXT("set_niagara_module_input"),
+			TEXT("Sets an existing module input (rapid-iteration parameter) on a NiagaraSystem — e.g. a Color module's color or InitializeParticle sprite size. parameter accepts the exact name from list_niagara_module_inputs or an unambiguous suffix/substring. Value type is inferred from the parameter: float | int | bool | linearcolor '(R=..,G=..,B=..,A=..)' | vec3 '(X=..,Y=..,Z=..)' | vec2 '(X=..,Y=..)'. No recompile needed; persist with save_asset. Returns {ok, parameter, type, scripts_updated}."),
+			{ { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem.")) },
+			  { TEXT("parameter"), TypedProp(TEXT("string"), TEXT("Name from list_niagara_module_inputs (suffix/substring OK if unambiguous).")) },
+			  { TEXT("value"), TypedProp(TEXT("string"), TEXT("Value string; format follows the parameter's type.")) } },
+			{ TEXT("system"), TEXT("parameter"), TEXT("value") }, &HandleSetNiagaraModuleInput);
 	}
 }
