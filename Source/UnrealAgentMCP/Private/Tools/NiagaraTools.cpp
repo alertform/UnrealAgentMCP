@@ -10,11 +10,13 @@
 #include "Factories/Factory.h"
 #include "Misc/PackageName.h"
 #include "Modules/ModuleManager.h"
+#include "Materials/MaterialInterface.h"
 #include "NiagaraComponent.h"
 #include "NiagaraEditorUtilities.h"
 #include "NiagaraEmitter.h"
 #include "NiagaraEmitterHandle.h"
 #include "NiagaraScript.h"
+#include "NiagaraSpriteRendererProperties.h"
 #include "NiagaraSystem.h"
 #include "NiagaraTypes.h"
 #include "Tools/McpToolUtils.h"
@@ -587,6 +589,69 @@ namespace
 		Out->SetStringField(TEXT("note"), TEXT("Rapid-iteration value written; persist with save_asset."));
 		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
 	}
+
+	// N2b: sprite-renderer material assignment. Doubles as diagnosis — reports what
+	// each renderer carried BEFORE the write (renderer material is the layer that
+	// silently defeats every particle/RI color edit when it is not what you assumed).
+	FAgentMcpToolResult HandleSetNiagaraRendererMaterial(const TSharedPtr<FJsonObject>& Args)
+	{
+		if (!Args) { return FAgentMcpToolResult::Error(TEXT("Missing arguments.")); }
+		FString SysPath, MatPath;
+		if (!Args->TryGetStringField(TEXT("system"), SysPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'system'.")); }
+		if (!Args->TryGetStringField(TEXT("material"), MatPath))
+			{ return FAgentMcpToolResult::Error(TEXT("Missing required 'material' (/Game path of a MaterialInterface).")); }
+
+		FString Err;
+		UNiagaraSystem* Sys = ResolveNiagaraSystem(SysPath, Err);
+		if (!Sys) { return FAgentMcpToolResult::Error(Err); }
+
+		UMaterialInterface* Mat = LoadObject<UMaterialInterface>(nullptr, *MatPath);
+		if (!Mat)
+		{
+			FString Pkg = MatPath;
+			int32 Dot = INDEX_NONE;
+			if (Pkg.FindChar(TEXT('.'), Dot)) { Pkg = Pkg.Left(Dot); }
+			Mat = LoadObject<UMaterialInterface>(nullptr, *(Pkg + TEXT(".") + FPackageName::GetShortName(Pkg)));
+		}
+		if (!Mat)
+			{ return FAgentMcpToolResult::Error(FString::Printf(TEXT("MaterialInterface not found: '%s'."), *MatPath)); }
+
+		TArray<TSharedPtr<FJsonValue>> Renderers;
+		int32 NumSet = 0;
+		for (const FNiagaraEmitterHandle& Handle : Sys->GetEmitterHandles())
+		{
+			FVersionedNiagaraEmitterData* Data = Handle.GetEmitterData();
+			if (!Data) { continue; }
+			for (UNiagaraRendererProperties* Props : Data->GetRenderers())
+			{
+				UNiagaraSpriteRendererProperties* Sprite = Cast<UNiagaraSpriteRendererProperties>(Props);
+				if (!Sprite) { continue; }
+				const TSharedRef<FJsonObject> R = MakeShared<FJsonObject>();
+				R->SetStringField(TEXT("emitter"), Handle.GetName().ToString());
+				R->SetStringField(TEXT("previous_material"),
+					Sprite->Material ? Sprite->Material->GetPathName() : TEXT("None (engine default)"));
+				Sprite->Modify();
+				Sprite->Material = Mat;
+				Sprite->PostEditChange();
+				R->SetStringField(TEXT("new_material"), Mat->GetPathName());
+				Renderers.Add(MakeShared<FJsonValueObject>(R));
+				++NumSet;
+			}
+		}
+		if (NumSet == 0)
+			{ return FAgentMcpToolResult::Error(TEXT("No sprite renderers found on this system's emitters.")); }
+
+		// Renderer swaps re-request compilation — same quiescence contract as the other tools.
+		Sys->WaitForCompilationComplete(/*bIncludingGPUShaders=*/true, /*bShowProgress=*/false);
+		Sys->MarkPackageDirty();
+
+		const TSharedRef<FJsonObject> Out = MakeShared<FJsonObject>();
+		Out->SetBoolField(TEXT("ok"), true);
+		Out->SetNumberField(TEXT("renderers_updated"), NumSet);
+		Out->SetArrayField(TEXT("renderers"), Renderers);
+		return FAgentMcpToolResult::Success(ToolUtils::SerializeObject(Out));
+	}
 }
 
 namespace AgentMcp::Tools
@@ -639,5 +704,11 @@ namespace AgentMcp::Tools
 			  { TEXT("parameter"), TypedProp(TEXT("string"), TEXT("Name from list_niagara_module_inputs (suffix/substring OK if unambiguous).")) },
 			  { TEXT("value"), TypedProp(TEXT("string"), TEXT("Value string; format follows the parameter's type.")) } },
 			{ TEXT("system"), TEXT("parameter"), TEXT("value") }, &HandleSetNiagaraModuleInput);
+
+		RegisterOne(TEXT("set_niagara_renderer_material"),
+			TEXT("Assigns a MaterialInterface to every sprite renderer on a NiagaraSystem's emitters and reports each renderer's PREVIOUS material — the layer that silently defeats particle-color edits when a template/default material ignores vertex color. Blocks until recompiled; persist with save_asset. Returns {ok, renderers_updated, renderers:[{emitter, previous_material, new_material}]}."),
+			{ { TEXT("system"), TypedProp(TEXT("string"), TEXT("/Game path of the NiagaraSystem.")) },
+			  { TEXT("material"), TypedProp(TEXT("string"), TEXT("/Game path of the MaterialInterface to assign.")) } },
+			{ TEXT("system"), TEXT("material") }, &HandleSetNiagaraRendererMaterial);
 	}
 }
