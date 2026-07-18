@@ -44,6 +44,7 @@ public class UnrealAgentMCP : ModuleRules
 			"MaterialEditor",
 			"Niagara",
 			"NiagaraEditor",
+			"Projects",
 		});
 	}
 }

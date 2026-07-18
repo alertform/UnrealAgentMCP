@@ -17,13 +17,34 @@
 #include "GameplayEffectComponents/TargetTagsGameplayEffectComponent.h"
 #include "GameplayTagContainer.h"
 #include "Kismet2/KismetEditorUtilities.h"
+#include "GameplayTagsManager.h"
+#include "Interfaces/IPluginManager.h"
 #include "Misc/ScopeExit.h"
-#include "NativeGameplayTags.h"
 #include "Tests/AgentMcpTestHelpers.h"
 #include "UObject/Package.h"
 
 // Plugin-local test tag — independent of any host project's tag registrations.
-UE_DEFINE_GAMEPLAY_TAG_STATIC(TAG_AgentMcpTestTarget, "AgentMcp.Test.TargetTag");
+// Registered from the plugin's Config/Tags ini on first use. Do NOT convert this
+// to UE_DEFINE_GAMEPLAY_TAG*: native tags are forbidden in Editor modules and the
+// resulting ensure fails every commandlet/cook run (Error_UnknownCookFailure).
+namespace
+{
+	FGameplayTag GetAgentMcpTestTargetTag()
+	{
+		const FName TagName(TEXT("AgentMcp.Test.TargetTag"));
+		UGameplayTagsManager& Manager = UGameplayTagsManager::Get();
+		FGameplayTag Tag = Manager.RequestGameplayTag(TagName, /*ErrorIfNotFound*/ false);
+		if (!Tag.IsValid())
+		{
+			if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("UnrealAgentMCP")))
+			{
+				Manager.AddTagIniSearchPath(Plugin->GetBaseDir() / TEXT("Config") / TEXT("Tags"));
+				Tag = Manager.RequestGameplayTag(TagName, /*ErrorIfNotFound*/ false);
+			}
+		}
+		return Tag;
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -430,7 +451,12 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 	const FString BpPath = CreateResult->GetStringField(TEXT("blueprint_path"));
 
 	// Step 2 — set_ge_target_tags with the plugin-local test tag.
-	const FString TestTagStr = TAG_AgentMcpTestTarget.GetTag().ToString();
+	const FGameplayTag TestTargetTag = GetAgentMcpTestTargetTag();
+	if (!TestTrue(TEXT("AgentMcp.Test.TargetTag registered from plugin Config/Tags"), TestTargetTag.IsValid()))
+	{
+		return true;
+	}
+	const FString TestTagStr = TestTargetTag.ToString();
 	const TSharedPtr<FJsonObject> SetResult = AgentMcpTestUtils::CallTool(*this, TEXT("set_ge_target_tags"),
 		FString::Printf(
 			TEXT("{\"blueprint_path\":\"%s\",\"granted_tags\":[\"%s\"]}"),
@@ -469,7 +495,7 @@ bool FSetGeTargetTagsTest::RunTest(const FString& Parameters)
 			if (Comp)
 			{
 				const FInheritedTagContainer& Tags = Comp->GetConfiguredTargetTagChanges();
-				const FGameplayTag TestTag = TAG_AgentMcpTestTarget.GetTag();
+				const FGameplayTag TestTag = TestTargetTag;
 				const bool bInAdded = Tags.Added.HasTagExact(TestTag);
 				const bool bInCombined = Tags.CombinedTags.HasTagExact(TestTag);
 				TestTrue(TEXT("AgentMcp.Test.TargetTag present in Added or CombinedTags"),
