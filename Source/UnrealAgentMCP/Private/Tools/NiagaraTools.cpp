@@ -377,7 +377,7 @@ namespace
 		}
 	}
 
-	/** float/int/bool/linearcolor/vec3/vec2 的存储字节 → JSON 值；其余类型标记 unsupported。 */
+	/** Storage bytes of float/int/bool/linearcolor/vec3/vec2 -> JSON value; other types marked unsupported. */
 	void WriteRapidIterationValue(const FNiagaraTypeDefinition& Type, const uint8* Data,
 		const TSharedRef<FJsonObject>& Obj)
 	{

@@ -7,7 +7,20 @@ No middleman process: the C++ plugin speaks MCP streamable-HTTP directly.
 Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Editor (this plugin)
 ```
 
-## Status: 1.3-dev — 73 tools
+## Highlights
+
+- **Native & in-process** — the MCP server is C++ running *inside* the Unreal Editor. No Python bridge, no middleman: the agent speaks JSON-RPC 2.0 straight to the engine.
+- **73 tools across 8 subsystems** — Blueprint graphs, UMG + MVVM, Animation (montage / notify / AnimGraph), Behavior Trees, Materials + instances, Niagara, level automation, and asset management.
+- **Safe by construction** — a 3-tier permission ceiling (ReadOnly / SafeWrite / Destructive) enforced at a single dispatch seam; destructive tools are rejected out of the box. Every call *and* every rejection is written to a JSONL audit trail.
+- **Every edit is Ctrl+Z** — all mutations run inside editor transactions; validation failures cancel cleanly with no undo-history noise.
+- **Closed-loop authoring** — the agent edits a graph → compiles → reads structured errors back → fixes → recompiles, without ever leaving the loop.
+- **62 automation tests** — including save → reload regression locks that catch headless data loss the editor would otherwise swallow silently.
+- **Spec'd by dogfooding** — every tool exists because a real editor task still needed human hands; those gaps became the roadmap.
+
+## Status — 73 tools (1.3-dev)
+
+<details>
+<summary><b>Full tool list &amp; feature log (1.0 → 1.3-dev)</b> — click to expand</summary>
 
 - MCP methods: `initialize` / `notifications/initialized` / `ping` / `tools/list` / `tools/call`
 - Tools (73): `engine_info`, `list_assets`, `read_graph`, `add_node`, `connect_pins`, `set_pin_default`, `delete_node`, `auto_layout`, `add_component_event`, `create_blueprint`, `compile_blueprint`, `undo`, `redo`, `read_output_log`, `take_screenshot`, `console_command`, `audit_tail`, `list_dirty_packages`, `load_level`, `get_cdo_property`, `set_cdo_property`, `reparent_blueprint`, `search_assets`, `get_asset_info`, `get_references`, `save_asset`, `delete_asset`, `spawn_actor`, `set_actor_transform`, `set_actor_property`, `query_actors`, `destroy_actor`, `add_variable`, `set_variable_flags`, `add_component`, `attach_component`, `set_component_property`, `create_input_action`, `create_mapping_context`, `add_mapping_entry`, `add_widget`, `list_widgets`, `set_widget_property`, `rename_widget`, `add_viewmodel`, `add_view_binding`, `list_view_bindings`, `remove_view_binding`, `create_anim_montage`, `add_anim_notify`, `set_ge_target_tags`, `add_compatible_skeleton`, `read_bt`, `add_bt_node`, `add_bt_decorator`, `add_anim_graph_node`, `register_skeleton_slot`, `create_material`, `add_material_expression`, `set_material_expression_property`, `connect_material_expression`, `connect_material_property`, `recompile_material`, `describe_material`, `create_material_instance`, `set_material_instance_parameter`, `describe_material_instance`, `assign_material`, `create_niagara_system`, `set_niagara_user_parameter`, `describe_niagara_system`, `place_niagara_component`, `add_niagara_emitter`
@@ -39,6 +52,8 @@ Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Edit
 - **Niagara emitter assembly** (1.3-dev): `add_niagara_emitter` copies a source `UNiagaraEmitter` asset into a system (engine templates under `/Niagara/DefaultAssets/Templates/Emitters` — Fountain, SimpleSpriteBurst, UpwardMeshBurst) via the **exported static `FNiagaraEditorUtilities::AddEmitterToSystem`** — the same call the system factory uses, NOT the fragile editor-ViewModel path the design had flagged, so this shipped as a real API call with its own LOAD_ForDiff persistence gate. Blocks until the system recompiles (quiescence contract). **`delete_asset` now drains outstanding async compilation** (`FAssetCompilingManager` + `GShaderCompilingManager::FinishAllCompilation`) before force-deleting: background compile tasks outliving a deleted asset crashed two headless runs with SparseArray/BitArray asserts on TargetPlatform workers — the drain sits at the one destructive chokepoint and protects every asset type.
 
 This release was specified by **dogfooding**: 1.0 was pointed at real main-menu UI work, and every action that still required human hands in the editor (class pin dropdowns, widget creation, MVVM binding panels, GameMode overrides, asset deletion) became a 1.1 tool; 1.2 closed the gaps the 1.1 cycle itself surfaced (widget rename, dirty-state visibility, path ergonomics).
+
+</details>
 
 ## Setup
 
@@ -86,7 +101,12 @@ Layer contract: the protocol layer never sees HTTP; the transport never sees too
 UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAgentMCP" -TestExit="Automation Test Queue Empty" -NullRHI -unattended -nopause -nosplash -log
 ```
 
+<details>
+<summary><b>Full test breakdown (62 tests)</b> — click to expand</summary>
+
 42 tests (baseline): registry (5), JSON-RPC protocol incl. hostile-input edge cases (7), tools end-to-end (1), node graph + blueprint tools incl. the P2 acceptance closed loop (5), safety core — audit trail, tier rejection, log capture, undo/redo round-trip, destructive tooling (5), P3b tool families — CDO get/set, asset search/info/refs/save, actor spawn/query/transform/destroy, variable add/flags, component add/attach/set, reparent (7), input + layout — input asset creation, mapping entries, auto_layout invariants (3), P5 widget + MVVM + gap-fill — class pin defaults, system-actor access, referencer-gated delete, widget-tree authoring, component bound events, MVVM authoring error contracts, binding list/remove lifecycle (7), P6 polish — widget rename incl. MVVM reference sync, dirty-package listing (2). **+4 P7 tests** (1.3-dev): FCreateAnimMontageTest, FAddAnimNotifyTest, FSetGeTargetTagsTest, FAddCompatibleSkeletonTest (each with multiple error-path assertions). **+2 level-automation tests** (1.3-dev): FLoadLevelErrorPathTest (missing map → isError + "not found"), FLoadLevelHappyPathTest (forces synchronous asset-registry scan then loads real map → asserts loaded=true + world name + engine_info.current_level; no soft-skip — fails honestly if LoadMap is unavailable). **+2 BT tests** (1.3-dev): FBTToolsHappyPathTest (programmatic BB+BT assets, add Selector root → add MoveTo with BlackboardKey → add Blackboard decorator with observer_aborts=self → read_bt full structure assertion), FBTToolsErrorPathTest (out-of-range index_path, non-BTNode class, missing BB key with available-keys list in error). **+2 BT regression locks** (1.3-dev): FBTSaveReloadTest (save → GC-unload → reload from disk → full structure assertion — the outer-normalization data-loss regression lock), FBTNormalizeOuterTest (foreign-outered node is re-outered to the BT asset by any write tool). **+2 AnimGraph tests** (1.3-dev): FAddAnimGraphNodeTest (transient AnimBlueprint + skeleton, add AnimGraphNode_Slot with Node.SlotName property, assert added+node_id+pins; error paths: missing ABP, non-AnimGraphNode class, missing node_class), FRegisterSkeletonSlotTest (transient skeleton, register slot, assert registered+slot_name; idempotent second call→already_registered; error paths: missing skeleton, missing slot_name). **+2 material tests** (1.3-dev): FMaterialAuthorRoundTripTest (create → 3 expressions → set props → wire into Multiply → connect EmissiveColor → describe assertion → recompile → save → LOAD_ForDiff reload → assert 3 expressions + Emissive connection survived), FMaterialCreateOutsideGameTest (/Engine destination → isError naming /Game). **+2 material instance/assign tests** (1.3-dev): FMaterialInstanceRoundTripTest (parent material exposing a ScalarParameter → MIC parented to it → override Glow=4.0 → describe assertion → save → LOAD_ForDiff reload → assert the override survived), FAssignMaterialTest (spawn a StaticMeshActor → assign_material → assert mesh slot 0 == the material). **+3 Niagara tests** (1.3-dev): FNiagaraSystemParamRoundTripTest (create system → set float + linearcolor user params → describe assertion → save → LOAD_ForDiff reload → assert both values survived), FPlaceNiagaraComponentTest (spawn actor → place_niagara_component → assert registered component + GetAsset identity), FNiagaraCreateOutsideGameTest (/Engine destination → isError naming /Game). **+1 emitter-assembly gate** (1.3-dev): FAddNiagaraEmitterRoundTripTest (fresh system → add the stock Fountain emitter → assert handle+count → save → LOAD_ForDiff reload → assert the emitter handle survived — green twice consecutively after the delete_asset compile-drain fix). **Total: 62 tests.**
+
+</details>
 
 ## Smoke test (curl)
 
