@@ -1,21 +1,75 @@
 # UnrealAgentMCP
 
-Native MCP (Model Context Protocol) server **inside** the Unreal Editor.
-No middleman process: the C++ plugin speaks MCP streamable-HTTP directly.
+A **governed** MCP (Model Context Protocol) server running **inside** the Unreal Editor.
+No middleman process: the C++ plugin speaks MCP streamable-HTTP straight to the engine.
+
+Letting an agent write to a real project is the easy part. Doing it with a permission
+boundary, an audit trail, and a guaranteed undo is the part that decides whether you can
+point it at work you care about. This plugin ships all three.
 
 ```
 Claude Code ──MCP streamable-HTTP (JSON-RPC 2.0, POST /mcp)──► UE Editor (this plugin)
+                                                                 │
+                              permission tier ── checked on ─────┤ every call
+                              audit record   ── written for ─────┤ every call & rejection
+                              transaction    ── wraps ───────────┘ every mutation
 ```
+
+> **Targets UE 5.5.** Unreal Engine 5.8 ships its own experimental MCP plugin —
+> see [Relationship to the official UE 5.8 MCP](#relationship-to-the-official-ue-58-mcp).
 
 ## Highlights
 
-- **Native & in-process** — the MCP server is C++ running *inside* the Unreal Editor. No Python bridge, no middleman: the agent speaks JSON-RPC 2.0 straight to the engine.
-- **73 tools across 8 subsystems** — Blueprint graphs, UMG + MVVM, Animation (montage / notify / AnimGraph), Behavior Trees, Materials + instances, Niagara, level automation, and asset management.
-- **Safe by construction** — a 3-tier permission ceiling (ReadOnly / SafeWrite / Destructive) enforced at a single dispatch seam; destructive tools are rejected out of the box. Every call *and* every rejection is written to a JSONL audit trail.
+- **Governed by construction** — a 3-tier permission ceiling (ReadOnly / SafeWrite / Destructive) enforced at a single dispatch seam, tier ordering guarded by `static_assert`. Destructive tools are rejected out of the box; raising the ceiling is a deliberate Project Settings change, and rejections carry a structured `rejected_by_tier` field so agents branch on policy, not on message text.
+- **Every call is on the record** — each invocation *and* each rejection lands in `Saved/AgentMCP/audit-YYYYMMDD.jsonl`. Destructive calls additionally write a pre-execute `:started` entry, so even an editor-killing command stays forensically attributable.
 - **Every edit is Ctrl+Z** — all mutations run inside editor transactions; validation failures cancel cleanly with no undo-history noise.
-- **Closed-loop authoring** — the agent edits a graph → compiles → reads structured errors back → fixes → recompiles, without ever leaving the loop.
+- **Closed-loop authoring** — the agent edits a graph → compiles → reads structured errors back → fixes → recompiles, without ever leaving the loop. An agent that can't observe its own breakage is the dominant failure mode of editor automation.
+- **Native & in-process** — C++ running *inside* the Unreal Editor. No Python bridge, no middleman: JSON-RPC 2.0 straight to the engine.
+- **73 tools across 8 subsystems** — Blueprint graphs, UMG + MVVM, Animation (montage / notify / AnimGraph), Behavior Trees, Materials + instances, Niagara, level automation, and asset management.
 - **62 automation tests** — including save → reload regression locks that catch headless data loss the editor would otherwise swallow silently.
 - **Spec'd by dogfooding** — every tool exists because a real editor task still needed human hands; those gaps became the roadmap.
+
+## Relationship to the official UE 5.8 MCP
+
+Unreal Engine 5.8 (June 2026) ships an experimental `ModelContextProtocol` plugin, a
+`ToolsetRegistry`, and 17 stock toolsets. It is the right long-term home for broad tool
+coverage: a tool is exposed by tagging any `UFUNCTION` with `meta=(AICallable)`, so Epic's
+marginal cost per tool is about one line. Measured against a 5.8 install, the shipped C++
+toolsets expose **144** `AICallable` functions (Niagara 49, Dataflow 17, Physics 17,
+Slate 14, GAS 14, UMG 13, …), with more on the Python side.
+
+Those 144 are *capacity*, not live tools. Probed on a 5.8 editor, the official server
+registers **three** tools at startup — `list_toolsets`, `describe_toolset`, `load_toolset`
+— and pulls a toolset's contents in on demand. Progressive disclosure, so the agent's
+context stays small.
+
+**This plugin does not compete on tool count, and on those subsystems it loses.** It covers
+a different axis:
+
+| | Official UE 5.8 MCP | UnrealAgentMCP |
+|---|---|---|
+| Permission model | none | 3-tier ceiling at one dispatch seam |
+| Audit trail | none | JSONL; logs calls **and** rejections |
+| Transactional writes | not a stated guarantee | every mutation, Ctrl+Z undoable |
+| Compile-feedback loop | — | edit → compile → structured errors → fix |
+| Blueprint graph authoring | no stock toolset | 10 tools incl. `auto_layout` |
+| Material **graph** authoring | instance tools only, no graph toolset | 11 tools (graph + instances + assign), save→reload locked |
+| Authentication | "no authentication layer" (Epic docs) | loopback-only + tier ceiling |
+| Engine version | 5.8+ | 5.5 |
+
+The permission/audit row isn't a judgement call: a keyword scan across the official
+plugin's sources returns **zero** hits for `Permission`, `Tier`, `Audit`, `Approval`,
+`Sandbox`, and `Consent`. Epic's documentation states plainly that the server "has no
+authentication layer" and "is not designed for remote use."
+
+**Practical read.** On 5.8+ and want breadth? Use the official toolsets — they are broader
+and will keep growing faster than any hand-written registry. On 5.5–5.7 there is no
+official option at all. And in either case, if the agent is pointed at a project you would
+rather not restore from source control, the governance layer is the part that matters.
+
+Epic's plugin accepts third-party tool registration via `IModelContextProtocolTool` and
+`UToolsetDefinition` — so wrapping the stock toolsets in this permission-and-audit pipeline,
+rather than duplicating them, is the natural direction. See [Roadmap](#roadmap).
 
 ## Status — 73 tools (1.3-dev)
 
@@ -83,12 +137,12 @@ Source/UnrealAgentMCP/
 └── Private/
     ├── Server/McpHttpServer.*      transport (engine HTTPServer module, game-thread handlers)
     ├── Tools/                      tool implementations (one family per file)
-    └── Tests/                      automation tests (55, covering P1-P8 + BT + AnimGraph save/reload)
+    └── Tests/                      automation tests (62, covering P1-P8 + BT + AnimGraph save/reload)
 ```
 
 Layer contract: the protocol layer never sees HTTP; the transport never sees tools; tools never see JSON-RPC. Everything meets at the registry.
 
-## Security model
+## Governance model
 
 - Binds 127.0.0.1 only (engine HTTPServer default — verify with `netstat -an | findstr 18777`).
 - Tier enforcement and the JSONL audit log are **live** (P3a): the ceiling check sits at the one dispatch seam every call passes through; the tier ordering is guarded by a `static_assert`.
@@ -114,6 +168,20 @@ UnrealEditor-Cmd.exe <project.uproject> -ExecCmds="Automation RunTests UnrealAge
 Invoke-RestMethod -Uri http://127.0.0.1:18777/mcp -Method Post -ContentType "application/json" `
   -Body '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"engine_info"}}'
 ```
+
+## Roadmap
+
+- **Govern the chokepoint, don't duplicate the tools.** Probing a 5.8 editor confirms a
+  third party can intercept: `RemoveTool` on a registered tool succeeds, a same-name
+  wrapper implementing `IModelContextProtocolTool` takes over the lookup, and forwarding
+  to the original works. Because the official server registers only `list_toolsets` /
+  `describe_toolset` / `load_toolset` up front, `load_toolset` is the natural place to
+  enforce policy — decide which toolsets an agent may load at all, rather than wrapping
+  tools one by one. `RefreshTools()` does clear the replacement, so re-wrapping from
+  `OnRefreshTools` is required, not optional.
+- **Deepen where the official plugin is empty.** Blueprint and Material graph authoring
+  have no stock toolset in 5.8; that is where hand-written tools still earn their cost.
+- **5.8 target.** Currently 5.5. Porting is gated on the wrap-vs-duplicate decision above.
 
 ## Standalone repository
 
